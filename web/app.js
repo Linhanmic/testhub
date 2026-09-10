@@ -9,6 +9,7 @@
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmtDur = (s) => {
     if (s == null || isNaN(s)) return '-';
+    if (s > 0 && s < 0.001) return '<1 ms';
     if (s < 1) return `${Math.round(s * 1000)} ms`;
     if (s < 60) return `${s.toFixed(2)} s`;
     const m = Math.floor(s / 60); const r = s - m * 60;
@@ -35,8 +36,15 @@
   const STATE_LABEL = { queued: '排队中', running: '运行中', passed: '通过', failed: '失败', skipped: '跳过', cancelled: '已取消', error: '错误',
     connected: '已连接', disconnected: '未连接', connecting: '连接中', busy: '执行中' };
   const pill = (state) => `<span class="pill ${esc(state)}">${esc(STATE_LABEL[state] || state)}</span>`;
+  const fmtIssue = (e) => (e.line > 0 ? `L${e.line}: ` : '') + e.message;
   const tags = (arr) => (arr || []).map((t) => `<span class="tag">${esc(t)}</span>`).join('') || '<span class="muted">-</span>';
-  const highlightStep = (text) => esc(text).replace(/(&quot;[^&]*?&quot;|&lt;[^&]*?&gt;)/g, '<span class="param">$1</span>');
+  // 高亮步骤参数；给定 dataRow 时把 <列名> 替换为该行的实际值
+  const highlightStep = (text, dataRow) => esc(text).replace(/(&quot;[^&]*?&quot;|&lt;([^&]*?)&gt;)/g, (m, whole, dyn) => {
+    if (dyn !== undefined && dataRow && Object.prototype.hasOwnProperty.call(dataRow, dyn)) {
+      return `<span class="param dyn" title="&lt;${esc(dyn)}&gt;">&quot;${esc(dataRow[dyn])}&quot;</span>`;
+    }
+    return `<span class="param">${whole}</span>`;
+  });
 
   async function api(path, opts = {}) {
     const init = { method: opts.method || 'GET', headers: {} };
@@ -121,7 +129,10 @@
     const page = routes[name] || routes.dashboard;
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === name));
     if (cleanup) { try { cleanup(); } catch {} cleanup = null; }
-    const main = $('#main');
+    // 用全新节点替换 #main，丢弃上一页面注册的所有事件监听器
+    const old = $('#main');
+    const main = old.cloneNode(false);
+    old.replaceWith(main);
     main.innerHTML = '<div class="loading">正在加载…</div>';
     Promise.resolve(page(main, rest.map(decodeURIComponent))).then((c) => { if (typeof c === 'function') cleanup = c; })
       .catch((e) => { main.innerHTML = `<div class="alert error">加载失败：${esc(e.message)}</div>`; });
@@ -288,8 +299,10 @@
     let state = '';
     const load = async () => {
       const data = await api(`/tests?limit=200${state ? `&state=${state}` : ''}`);
-      $('#tests-table').innerHTML = renderTestTable(data.tests, { actions: true });
-      $('#tests-count').textContent = `${data.count} / ${data.total} 条 · 队列 ${data.queue_size}`;
+      const table = $('#tests-table', main);
+      if (!table) return; // 页面已切换
+      table.innerHTML = renderTestTable(data.tests, { actions: true });
+      $('#tests-count', main).textContent = `${data.count} / ${data.total} 条 · 队列 ${data.queue_size}`;
     };
     main.innerHTML = `${header('测试记录', '所有已提交测试的状态与结果', `<button class="btn danger" id="clear-history">清空历史</button><a class="btn primary" href="#/run">▶ 提交测试</a>`)}
       <div class="toolbar">
@@ -320,14 +333,103 @@
   // ------------------------------------------------------------
   // 页面：测试详情
   // ------------------------------------------------------------
+  // 运行中的测试没有最终结果，根据事件流构建实时执行树
+  function createLiveTree() {
+    const specs = [];
+    const findSpec = (file) => {
+      let s = specs.find((x) => x.file === file);
+      if (!s) { s = { file, name: file, state: 'running', total: null, scenarios: [] }; specs.push(s); }
+      return s;
+    };
+    const runningScenario = (d) => {
+      const s = findSpec(d.spec);
+      for (let i = s.scenarios.length - 1; i >= 0; i--) if (s.scenarios[i].name === d.scenario && s.scenarios[i].state === 'running') return s.scenarios[i];
+      return null;
+    };
+    const finishRunning = (steps, state) => steps.forEach((st) => { if (st.state === 'running') st.state = state; finishRunning(st.children, state); });
+    const apply = (ev) => {
+      const d = ev.data || {};
+      switch (ev.event) {
+        case 'spec.started': { const s = findSpec(d.spec); s.name = d.name || d.spec; s.total = parseInt(d.scenarios, 10) || 0; break; }
+        case 'spec.completed': { const s = findSpec(d.spec); s.state = d.state || 'passed'; s.duration = parseFloat(d.duration); s.error = d.error; break; }
+        case 'scenario.started': findSpec(d.spec).scenarios.push({ name: d.scenario, dataRow: d.data_row, state: 'running', steps: [], stack: [] }); break;
+        case 'scenario.completed': {
+          const sc = runningScenario(d);
+          if (sc) { sc.state = d.state || 'passed'; sc.duration = parseFloat(d.duration); sc.error = d.error; finishRunning(sc.steps, 'skipped'); sc.stack = []; }
+          break;
+        }
+        case 'step.started': {
+          const sc = runningScenario(d);
+          if (!sc) break;
+          const st = { step: d.step, state: 'running', concept: d.is_concept === 'true', children: [] };
+          (sc.stack.length ? sc.stack[sc.stack.length - 1].children : sc.steps).push(st);
+          if (st.concept) sc.stack.push(st);
+          break;
+        }
+        case 'step.completed': {
+          const sc = runningScenario(d);
+          if (!sc) break;
+          const top = sc.stack[sc.stack.length - 1];
+          const list = top && top.step !== d.step ? top.children : (sc.stack.length > 1 ? sc.stack[sc.stack.length - 2].children : sc.steps);
+          let st = null;
+          for (let i = list.length - 1; i >= 0; i--) if (list[i].step === d.step && list[i].state === 'running') { st = list[i]; break; }
+          if (!st && top && top.step === d.step) st = top;
+          if (st) { st.state = d.state || 'passed'; st.duration = parseFloat(d.duration); st.error = d.error; if (st.concept && top === st) sc.stack.pop(); }
+          break;
+        }
+        default: break;
+      }
+    };
+    const stepsHtml = (steps) => steps.map((st) => {
+      const mark = { passed: '✓', failed: '✗', error: '!', skipped: '–', running: '◌' }[st.state] || '·';
+      const right = st.state === 'running' ? '<span class="pill running">运行中</span>' : (st.duration != null && !isNaN(st.duration) ? `<span class="dur">${fmtDur(st.duration)}</span>` : '');
+      let html = `<div class="step ${esc(st.state)}"><span class="mark">${mark}</span><span class="text">${highlightStep(st.step)}${st.concept ? ' <span class="tag">concept</span>' : ''}</span>${right}</div>`;
+      if (st.error) html += `<div class="step-error">${esc(st.error)}</div>`;
+      if (st.children.length) html += `<div class="concept-steps">${stepsHtml(st.children)}</div>`;
+      return html;
+    }).join('');
+    const render = (state) => {
+      if (!specs.length) return `<div class="card"><div class="empty">${state === 'queued' ? '排队中，等待 Runner 空闲…' : '正在启动执行，等待第一个规范…'}</div></div>`;
+      return `<div class="tree live">${specs.map((sp) => `
+        <div class="node open">
+          <div class="node-head"><span class="caret">▶</span>${pill(sp.state)}<b>${esc(sp.name)}</b><span class="muted mono small">${esc(sp.file)}</span>
+            <span class="muted small">${sp.scenarios.filter((s) => s.state !== 'running').length}/${sp.total ?? '?'}</span>${sp.duration != null && !isNaN(sp.duration) ? `<span class="dur">${fmtDur(sp.duration)}</span>` : ''}</div>
+          <div class="node-body">
+            ${sp.error ? `<div class="alert error">${esc(sp.error)}</div>` : ''}
+            ${sp.scenarios.map((sc) => `
+              <div class="node scenario open">
+                <div class="node-head"><span class="caret">▶</span>${pill(sc.state)}<span>${esc(sc.name)}</span>
+                  ${sc.dataRow != null ? `<span class="muted small">数据行 ${parseInt(sc.dataRow, 10) + 1}</span>` : ''}${sc.duration != null && !isNaN(sc.duration) ? `<span class="dur">${fmtDur(sc.duration)}</span>` : ''}</div>
+                <div class="node-body">${stepsHtml(sc.steps) || '<div class="muted small">等待第一个步骤…</div>'}${sc.error && !sc.steps.some((s) => s.error) ? `<div class="step-error">${esc(sc.error)}</div>` : ''}</div>
+              </div>`).join('') || '<div class="muted small">等待场景开始…</div>'}
+          </div>
+        </div>`).join('')}</div>`;
+    };
+    return { apply, render };
+  }
+
   async function testDetail(main, id) {
     let status, result = null;
     try { status = await api(`/tests/${id}`); } catch (e) { main.innerHTML = `<div class="alert error">${esc(e.message)}</div><a class="btn" href="#/tests">返回列表</a>`; return; }
     if (status.has_result) result = await api(`/tests/${id}/result`);
-    const events = await api(`/tests/${id}/events?limit=300`);
+    const events = await api(`/tests/${id}/events?limit=1000`);
+    const liveTree = createLiveTree();
+    events.events.forEach(liveTree.apply);
+
+    const isActive = () => status.state === 'queued' || status.state === 'running';
+    const statusCardHtml = () => `
+      <div class="flex gap" style="justify-content:space-between;margin-bottom:8px">
+        <div><b>${status.executed_scenarios}</b> / ${status.total_scenarios} 场景 · <span style="color:var(--pass)">${status.passed_scenarios} 通过</span> · <span style="color:var(--fail)">${status.failed_scenarios} 失败</span> · ${status.skipped_scenarios} 跳过</div>
+        <div class="muted">${Math.round((status.progress || 0) * 100)}%</div>
+      </div>
+      <div class="progress ${status.state}"><div style="width:${Math.round((status.progress || 0) * 100)}%"></div></div>
+      ${isActive() && status.current_step ? `<div class="mt small muted">当前：<span class="mono">${esc(status.current_spec)}</span> › ${esc(status.current_scenario)} › <span class="mono">${esc(status.current_step)}</span></div>` : ''}
+      ${(status.errors || []).map((e) => `<div class="alert error mt">${esc(e)}</div>`).join('')}
+      ${(status.warnings || []).map((e) => `<div class="alert warn mt">${esc(e)}</div>`).join('')}`;
+    const treeHtml = () => (result ? renderResultTree(result) : (isActive() ? liveTree.render(status.state) : '<div class="card"><div class="empty">无结果</div></div>'));
 
     const render = () => {
-      const active = status.state === 'queued' || status.state === 'running';
+      const active = isActive();
       const req = status.request || {};
       const r = result || {};
       main.innerHTML = `
@@ -336,17 +438,8 @@
           <a class="btn" href="#/tests">← 列表</a>`)}
         <div class="grid grid-main">
           <div class="grid" style="align-content:start">
-            <div class="card"><div class="card-body">
-              <div class="flex gap" style="justify-content:space-between;margin-bottom:8px">
-                <div><b>${status.executed_scenarios}</b> / ${status.total_scenarios} 场景 · <span style="color:var(--pass)">${status.passed_scenarios} 通过</span> · <span style="color:var(--fail)">${status.failed_scenarios} 失败</span> · ${status.skipped_scenarios} 跳过</div>
-                <div class="muted">${Math.round((status.progress || 0) * 100)}%</div>
-              </div>
-              <div class="progress ${status.state}"><div style="width:${Math.round((status.progress || 0) * 100)}%"></div></div>
-              ${active && status.current_step ? `<div class="mt small muted">当前：<span class="mono">${esc(status.current_spec)}</span> › ${esc(status.current_scenario)} › <span class="mono">${esc(status.current_step)}</span></div>` : ''}
-              ${(status.errors || []).map((e) => `<div class="alert error mt">${esc(e)}</div>`).join('')}
-              ${(status.warnings || []).map((e) => `<div class="alert warn mt">${esc(e)}</div>`).join('')}
-            </div></div>
-            <div id="result-tree">${result ? renderResultTree(result) : `<div class="card"><div class="empty">${active ? '测试尚在执行，结果将实时更新…' : '无结果'}</div></div>`}</div>
+            <div class="card"><div class="card-body" id="status-card">${statusCardHtml()}</div></div>
+            <div id="result-tree">${treeHtml()}</div>
           </div>
           <div class="grid" style="align-content:start">
             <div class="card"><div class="card-header"><h2>请求</h2></div><div class="card-body"><dl class="kv">
@@ -378,21 +471,20 @@
       if (deleted) location.hash = '#/tests';
     });
 
-    let timer = null;
+    let timer = null, treeTimer = null;
     const refresh = async () => {
       try {
         status = await api(`/tests/${id}`);
-        if (status.has_result) { result = await api(`/tests/${id}/result`); render(); }
-        else {
-          const active = status.state === 'queued' || status.state === 'running';
-          const bar = $('.progress > div', main); if (bar) bar.style.width = `${Math.round((status.progress || 0) * 100)}%`;
-          if (!active) render();
-          else {
-            const info = $('.card-body .flex.gap > div', main);
-            if (info) info.innerHTML = `<b>${status.executed_scenarios}</b> / ${status.total_scenarios} 场景 · <span style="color:var(--pass)">${status.passed_scenarios} 通过</span> · <span style="color:var(--fail)">${status.failed_scenarios} 失败</span> · ${status.skipped_scenarios} 跳过`;
-          }
-        }
+        if (status.has_result) { result = await api(`/tests/${id}/result`); render(); return; }
+        if (!isActive()) { render(); return; }
+        const card = $('#status-card', main);
+        if (card) card.innerHTML = statusCardHtml();
       } catch {}
+    };
+    const redrawTree = () => {
+      if (result) return;
+      const tree = $('#result-tree', main);
+      if (tree) { tree.innerHTML = treeHtml(); bindTree(tree); }
     };
     const off = live.on((ev) => {
       if (ev.test_id !== id) return;
@@ -403,17 +495,24 @@
         $('#detail-ev-count').textContent = feed.children.length;
       }
       if (ev.event === 'test.completed' || ev.event === 'test.cancelled') { setTimeout(refresh, 150); return; }
+      if (/^(spec|scenario|step)\./.test(ev.event)) {
+        liveTree.apply(ev);
+        clearTimeout(treeTimer); treeTimer = setTimeout(redrawTree, 60);
+      }
       if (ev.event === 'test.progress' || ev.event === 'scenario.completed' || ev.event === 'test.started') { clearTimeout(timer); timer = setTimeout(refresh, 250); }
     });
-    return () => { off(); clearTimeout(timer); };
+    return () => { off(); clearTimeout(timer); clearTimeout(treeTimer); };
   }
 
-  function stepHtml(s) {
+  function stepHtml(s, dataRow, implemented) {
     const mark = { passed: '✓', failed: '✗', error: '!', skipped: '–' }[s.state] || '·';
-    let html = `<div class="step ${esc(s.state)}"><span class="mark">${mark}</span><span class="text">${highlightStep(s.step)}${s.is_concept ? ' <span class="tag">concept</span>' : ''}</span><span class="dur">${fmtDur(s.duration)}</span></div>`;
+    const missing = implemented && !s.is_concept && s.parameterized_text && !implemented.has(s.parameterized_text);
+    const showDur = s.duration != null && s.state !== 'skipped' && s.state !== 'none';
+    const right = showDur ? `<span class="dur">${fmtDur(s.duration)}</span>` : (missing ? '<span class="pill error" title="Runner 未报告此步骤的实现">未实现</span>' : '');
+    let html = `<div class="step ${esc(s.state)}${missing ? ' missing' : ''}"><span class="mark">${mark}</span><span class="text">${highlightStep(s.step, dataRow)}${s.is_concept ? ' <span class="tag">concept</span>' : ''}</span>${right}</div>`;
     if (s.error) html += `<div class="step-error">${esc(s.error)}${s.stack_trace ? '\n' + esc(s.stack_trace) : ''}</div>`;
     if (s.messages && s.messages.length) html += `<div class="step-msgs">${s.messages.map(esc).join('<br>')}</div>`;
-    if (s.is_concept && s.concept_steps) html += `<div class="concept-steps">${s.concept_steps.map(stepHtml).join('')}</div>`;
+    if (s.is_concept && s.concept_steps) html += `<div class="concept-steps">${s.concept_steps.map((c) => stepHtml(c, dataRow, implemented)).join('')}</div>`;
     return html;
   }
   function renderResultTree(result) {
@@ -429,11 +528,11 @@
             <div class="node scenario ${sc.state !== 'passed' ? 'open' : ''}">
               <div class="node-head"><span class="caret">▶</span>${pill(sc.state)}<span>${esc(sc.name)}</span>
                 ${sc.data_row_index != null && sc.data_row_index >= 0 ? `<span class="datarow">${Object.entries(sc.data_row || {}).map(([k, v]) => `<span>${esc(k)}=${esc(v)}</span>`).join('')}</span>` : ''}
-                <span class="muted small">L${sc.line_number}</span><span class="dur">${fmtDur(sc.duration)}</span></div>
+                <span class="muted small">L${sc.line_number}</span>${sc.duration ? `<span class="dur">${fmtDur(sc.duration)}</span>` : ''}</div>
               <div class="node-body">
-                ${sc.context_steps && sc.context_steps.length ? `<div class="section-label">上下文</div>${sc.context_steps.map(stepHtml).join('')}` : ''}
-                <div class="section-label">步骤</div>${(sc.steps || []).map(stepHtml).join('') || '<div class="muted small">无步骤</div>'}
-                ${sc.teardown_steps && sc.teardown_steps.length ? `<div class="section-label">清理</div>${sc.teardown_steps.map(stepHtml).join('')}` : ''}
+                ${sc.context_steps && sc.context_steps.length ? `<div class="section-label">上下文</div>${sc.context_steps.map((st) => stepHtml(st, sc.data_row)).join('')}` : ''}
+                <div class="section-label">步骤</div>${(sc.steps || []).map((st) => stepHtml(st, sc.data_row)).join('') || '<div class="muted small">无步骤</div>'}
+                ${sc.teardown_steps && sc.teardown_steps.length ? `<div class="section-label">清理</div>${sc.teardown_steps.map((st) => stepHtml(st, sc.data_row)).join('')}` : ''}
               </div>
             </div>`).join('') || '<div class="muted">无匹配场景</div>'}
         </div>
@@ -525,7 +624,7 @@
         ${data.specs.map((s) => `<tr class="clickable" onclick="location.hash='#/specs/${encodeURIComponent(s.file)}'">
           <td class="mono">${esc(s.file)}</td><td>${esc(s.heading || '-')}</td><td>${tags(s.tags)}</td>
           <td class="num">${s.scenario_count}${s.is_data_driven ? ' <span class="tag">数据驱动</span>' : ''}</td>
-          <td>${s.valid ? '<span class="pill passed">有效</span>' : `<span class="pill failed" title="${esc(s.errors.map((e) => `L${e.line}: ${e.message}`).join('\n'))}">${s.errors.length} 个错误</span>`}</td>
+          <td>${s.valid ? '<span class="pill passed">有效</span>' : `<span class="pill failed" title="${esc(s.errors.map(fmtIssue).join('\n'))}">${s.errors.length} 个错误</span>`}</td>
           <td class="right nowrap" onclick="event.stopPropagation()"><a class="btn sm primary" href="#/run/${encodeURIComponent(s.file)}" ${s.valid ? '' : 'style="pointer-events:none;opacity:.5"'}>▶ 运行</a></td>
         </tr>`).join('')}</tbody></table>` : '<div class="empty">规范目录为空。点击“新建规范”开始。</div>'}</div></div>
       ${concepts.count ? `<div class="card mt"><div class="card-header"><h2>概念（.cpt）</h2></div><div class="table-wrap"><table><thead><tr><th>概念</th><th>参数</th><th>步骤数</th><th>文件</th></tr></thead><tbody>
@@ -551,22 +650,35 @@
     let data;
     try { data = await api(`/specs/${enc}`); } catch (e) { main.innerHTML = `<div class="alert error">${esc(e.message)}</div><a class="btn" href="#/specs">返回</a>`; return; }
     const sp = data.spec || {};
+    // Runner 报告的已实现步骤（mock Runner 不报告 -> 不做标记）
+    let implemented = null;
+    try {
+      const rs = await api('/runner/steps');
+      if (rs.reported) implemented = new Set(rs.steps.map((x) => x.parameterized_text));
+    } catch {}
+    const countMissing = () => {
+      if (!implemented) return 0;
+      const all = [...(sp.contexts || []), ...(sp.scenarios || []).flatMap((sc) => sc.steps), ...(sp.teardowns || [])];
+      return all.filter((st) => !st.is_concept && !implemented.has(st.parameterized_text)).length;
+    };
     let tab = 'view';
     const render = () => {
-      main.innerHTML = `${header(`<span class="mono">${esc(file)}</span>`, `${esc(sp.heading || '')} · ${sp.scenario_count || 0} 个场景 ${tags(sp.tags)}`,
+      const missing = countMissing();
+      main.innerHTML = `${header(`<span class="mono">${esc(file)}</span>`, `${esc(sp.heading || '')} · ${sp.scenario_count || 0} 个场景${(sp.tags || []).length ? ` · ${tags(sp.tags)}` : ''}`,
         `<a class="btn primary" href="#/run/${encodeURIComponent(file)}" ${data.valid ? '' : 'style="pointer-events:none;opacity:.5"'}>▶ 运行</a><button class="btn danger" id="del-spec">删除</button><a class="btn" href="#/specs">← 列表</a>`)}
-        ${data.errors.length ? `<div class="alert error"><b>解析错误</b><ul style="margin:6px 0 0;padding-left:18px">${data.errors.map((e) => `<li>L${e.line}: ${esc(e.message)}</li>`).join('')}</ul></div>` : ''}
-        ${data.warnings.length ? `<div class="alert warn"><b>警告</b><ul style="margin:6px 0 0;padding-left:18px">${data.warnings.map((e) => `<li>L${e.line}: ${esc(e.message)}</li>`).join('')}</ul></div>` : ''}
+        ${data.errors.length ? `<div class="alert error"><b>解析错误</b><ul style="margin:6px 0 0;padding-left:18px">${data.errors.map((e) => `<li>${esc(fmtIssue(e))}</li>`).join('')}</ul></div>` : ''}
+        ${data.warnings.length ? `<div class="alert warn"><b>警告</b><ul style="margin:6px 0 0;padding-left:18px">${data.warnings.map((e) => `<li>${esc(fmtIssue(e))}</li>`).join('')}</ul></div>` : ''}
+        ${missing ? `<div class="alert warn"><b>${missing} 个步骤在当前 Runner 中没有实现</b>，运行时将报错。请在 Runner 的 step_impl 中补充实现，或检查步骤文本是否一致。</div>` : ''}
         <div class="tabs"><button data-tab="view" class="${tab === 'view' ? 'active' : ''}">结构</button><button data-tab="source" class="${tab === 'source' ? 'active' : ''}">源码</button><button data-tab="edit" class="${tab === 'edit' ? 'active' : ''}">编辑</button></div>
         <div id="tab-body"></div>`;
       const body = $('#tab-body');
       if (tab === 'view') {
         body.innerHTML = `<div class="grid grid-main">
           <div class="tree">
-            ${sp.contexts && sp.contexts.length ? `<div class="card"><div class="card-header"><h3>上下文步骤</h3></div><div class="card-body">${sp.contexts.map((s) => stepHtml({ ...s, step: s.text, state: 'none' })).join('')}</div></div>` : ''}
+            ${sp.contexts && sp.contexts.length ? `<div class="card"><div class="card-header"><h3>上下文步骤</h3></div><div class="card-body">${sp.contexts.map((s) => stepHtml({ ...s, step: s.text, state: 'none' }, null, implemented)).join('')}</div></div>` : ''}
             ${(sp.scenarios || []).map((sc) => `<div class="node open"><div class="node-head"><span class="caret">▶</span><b>${esc(sc.name)}</b>${tags(sc.tags)}<span class="muted small">L${sc.line_number}</span><span class="dur">${sc.steps.length} 步</span></div>
-              <div class="node-body">${sc.steps.map((s) => stepHtml({ ...s, step: s.text, state: 'none' })).join('') || '<div class="muted">无步骤</div>'}</div></div>`).join('') || '<div class="card"><div class="empty">没有场景</div></div>'}
-            ${sp.teardowns && sp.teardowns.length ? `<div class="card"><div class="card-header"><h3>清理步骤</h3></div><div class="card-body">${sp.teardowns.map((s) => stepHtml({ ...s, step: s.text, state: 'none' })).join('')}</div></div>` : ''}
+              <div class="node-body">${sc.steps.map((s) => stepHtml({ ...s, step: s.text, state: 'none' }, null, implemented)).join('') || '<div class="muted">无步骤</div>'}</div></div>`).join('') || '<div class="card"><div class="empty">没有场景</div></div>'}
+            ${sp.teardowns && sp.teardowns.length ? `<div class="card"><div class="card-header"><h3>清理步骤</h3></div><div class="card-body">${sp.teardowns.map((s) => stepHtml({ ...s, step: s.text, state: 'none' }, null, implemented)).join('')}</div></div>` : ''}
           </div>
           <div>${sp.data_table ? `<div class="card"><div class="card-header"><h3>数据表</h3><span class="muted small">${sp.data_table.rows.length} 行</span></div><div class="table-wrap"><table><thead><tr>${sp.data_table.headers.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${sp.data_table.rows.map((r) => `<tr>${r.map((c) => `<td class="mono">${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>` : '<div class="card"><div class="empty">无数据表</div></div>'}</div>
         </div>`;
@@ -581,7 +693,7 @@
         $('#validate-spec').onclick = async () => {
           const r = await api('/specs/validate', { method: 'POST', body: { content: $('#editor').value, file } });
           const res = r.results[0];
-          $('#edit-out').innerHTML = res.valid ? `<div class="alert ok">校验通过：${res.scenario_count} 个场景</div>` : `<div class="alert error">${res.errors.map((e) => `L${e.line}: ${esc(e.message)}`).join('<br>')}</div>`;
+          $('#edit-out').innerHTML = res.valid ? `<div class="alert ok">校验通过：${res.scenario_count} 个场景</div>` : `<div class="alert error">${res.errors.map((e) => esc(fmtIssue(e))).join('<br>')}</div>`;
         };
         $('#save-spec').onclick = async () => {
           try {
