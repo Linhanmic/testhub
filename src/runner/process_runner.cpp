@@ -211,26 +211,40 @@ bool ChildProcess::isRunning() const {
 }
 
 void ChildProcess::terminate(int graceMs) {
-    if (pid_ <= 0 || exited_) return;
+    if (pid_ <= 0) return;
     closeStdin();
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(graceMs);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (!isRunning()) return;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    if (!exited_) {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(graceMs);
+        while (std::chrono::steady_clock::now() < deadline && isRunning()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (isRunning()) {
+            kill(-pid_, SIGTERM);
+            kill(pid_, SIGTERM);
+            deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+            while (std::chrono::steady_clock::now() < deadline && isRunning()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        }
+        if (isRunning()) {
+            kill(-pid_, SIGKILL);
+            kill(pid_, SIGKILL);
+            int status = 0;
+            waitpid(pid_, &status, 0);
+            exited_ = true;
+            exitCode_ = 137;
+        }
     }
-    kill(-pid_, SIGTERM);
-    kill(pid_, SIGTERM);
-    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (!isRunning()) return;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // 命令经 `sh -c` 启动：直接子进程（sh）退出后，真正的 Runner 可能作为孤儿进程仍持有
+    // stdout/stderr 管道，读线程将永远等不到 EOF。子进程启动时自成进程组，这里清理整个组。
+    if (kill(-pid_, 0) == 0) {
+        kill(-pid_, SIGTERM);
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (std::chrono::steady_clock::now() < deadline && kill(-pid_, 0) == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (kill(-pid_, 0) == 0) kill(-pid_, SIGKILL);
     }
-    kill(-pid_, SIGKILL);
-    kill(pid_, SIGKILL);
-    int status = 0;
-    waitpid(pid_, &status, 0);
-    exited_ = true;
-    exitCode_ = 137;
 }
 
 bool ChildProcess::writeLine(const std::string& line) {
@@ -347,9 +361,10 @@ void ProcessRunner::stop() {
         kill["id"] = static_cast<long long>(nextId_++);
         kill["type"] = "kill";
         process_->writeLine(kill.dump());
-        // 先礼后兵：等待 Runner 自行退出，超时后向进程组发 SIGTERM/SIGKILL
-        process_->terminate(1500);
     }
+    // 先礼后兵：等待 Runner 自行退出，超时后向进程组发 SIGTERM/SIGKILL；
+    // 即使直接子进程已退出也要执行，以清理仍持有管道的孤儿进程，否则下面的 join 会永久阻塞
+    process_->terminate(1500);
     running_ = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
