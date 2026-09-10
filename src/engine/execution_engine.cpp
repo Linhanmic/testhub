@@ -547,6 +547,10 @@ void ExecutionEngine::execute(const TestTask& task) {
         ctx.status = it->second.status;
     }
 
+    // 整个测试独占 Runner 池中的一个 Runner 进程：suite/spec 钩子与所有场景都落在同一进程上，
+    // 不同测试则在不同进程上真正并行；池中没有空闲 Runner 时在此等待（状态仍为 queued）
+    RunnerBridge::Session session = runner_.acquireSession();
+
     int timeoutMs = ctx.request.timeoutMs > 0 ? ctx.request.timeoutMs : config_.defaultTimeoutMs;
     ctx.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     ctx.tagFilter = TagFilter::all(ctx.request.tags);
@@ -855,9 +859,7 @@ ScenarioResult ExecutionEngine::executeScenario(RunContext& ctx, const spec::Spe
         }
     }
 
-    // 多个测试并发时，整个场景独占 Runner，避免不同场景的步骤在有状态 Runner 中交错
-    RunnerBridge::Session session = runner_.acquireSession();
-
+    // 场景运行在测试级会话绑定的 Runner 上（见 executeTest），不同测试的步骤不会在同一有状态 Runner 中交错
     auto start = std::chrono::steady_clock::now();
     std::map<std::string, std::string> eventData = {
         {"spec", specification.fileName},

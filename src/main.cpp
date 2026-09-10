@@ -44,6 +44,7 @@ void printUsage(const char* program) {
         << "  -l, --language <lang>      Runner 语言：mock | python | node | custom（默认 mock）\n"
         << "  -r, --runner-cmd <cmd>     自定义 Runner 启动命令（覆盖语言默认值）\n"
         << "  -d, --dir <path>           测试项目目录（Runner 工作目录）\n"
+        << "      --runner-pool <n>      Runner 进程数（默认 0：跟随 -j，每个并发测试一个进程）\n"
         << "  -s, --specs <path>         规范目录（默认 specs）\n"
         << "      --concepts <path>      概念(.cpt)目录（默认与规范目录相同）\n"
         << "      --watch-interval <ms>  规范目录轮询间隔（默认 2000，0 禁用）\n"
@@ -76,7 +77,7 @@ void printUsage(const char* program) {
 
 bool needsValue(const std::string& opt) {
     static const char* withValue[] = {
-        "-p", "--port", "-H", "--host", "-l", "--language", "-r", "--runner-cmd", "-d", "--dir",
+        "-p", "--port", "-H", "--host", "-l", "--language", "-r", "--runner-cmd", "-d", "--dir", "--runner-pool",
         "-s", "--specs", "--concepts", "--watch-interval", "-c", "--config", "-j", "--concurrency", "--timeout",
         "--results-dir", "--public-url", "--auth-token", "--log-level", "--log-file", "--web-dir", "--pid-file"};
     for (const char* w : withValue) {
@@ -157,6 +158,8 @@ int main(int argc, char* argv[]) {
             if (config.runnerLanguage == "mock") config.runnerLanguage = "custom";
         } else if (opt == "-d" || opt == "--dir") {
             config.projectPath = value;
+        } else if (opt == "--runner-pool") {
+            config.runnerPoolSize = parseIntOrExit(opt, value);
         } else if (opt == "-s" || opt == "--specs") {
             config.specsDir = value;
         } else if (opt == "--concepts") {
@@ -210,6 +213,11 @@ int main(int argc, char* argv[]) {
         return 2;
     }
     if (config.maxConcurrentTests < 1) config.maxConcurrentTests = 1;
+    if (config.runnerPoolSize < 0) config.runnerPoolSize = 0;
+    if (config.runnerPoolSize > testhub::RunnerBridge::kMaxPoolSize) {
+        std::cerr << "错误: --runner-pool 最大为 " << testhub::RunnerBridge::kMaxPoolSize << "\n";
+        return 2;
+    }
 
     if (printConfig) {
         std::cout << config.toJson().dump(2) << "\n";

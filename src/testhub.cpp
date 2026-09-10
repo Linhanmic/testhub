@@ -33,6 +33,7 @@ void TestHubConfig::applyJson(const Json& json) {
     if (runner["auto_restart"].isBool()) autoRestartRunner = runner["auto_restart"].asBool();
     if (runner["max_restarts"].isNumber()) runnerMaxRestarts = runner["max_restarts"].asInt();
     if (runner["mock_delay_ms"].isNumber()) mockDelayMs = runner["mock_delay_ms"].asInt();
+    if (runner["pool_size"].isNumber()) runnerPoolSize = runner["pool_size"].asInt();
 
     const Json& execution = json["execution"];
     if (execution["max_concurrent_tests"].isNumber()) maxConcurrentTests = execution["max_concurrent_tests"].asInt();
@@ -87,6 +88,7 @@ Json TestHubConfig::toJson(bool maskSecrets) const {
     runner["auto_restart"] = autoRestartRunner;
     runner["max_restarts"] = runnerMaxRestarts;
     runner["mock_delay_ms"] = mockDelayMs;
+    runner["pool_size"] = runnerPoolSize;
     j["runner"] = runner;
 
     Json execution = Json::object();
@@ -214,6 +216,7 @@ bool TestHub::start() {
     runnerConfig.autoRestart = config_.autoRestartRunner;
     runnerConfig.maxRestarts = config_.runnerMaxRestarts;
     runnerConfig.mockDelayMs = config_.mockDelayMs;
+    runnerConfig.poolSize = config_.effectiveRunnerPoolSize();
     if (!runnerBridge_->start(runnerConfig)) {
         TH_LOG_WARN("testhub", "Runner failed to start; tests will error until the runner is available");
     }
@@ -231,7 +234,8 @@ bool TestHub::start() {
     TH_LOG_INFO("testhub", std::string("TestHub ") + version() + " started on http://" +
                            (config_.host == "0.0.0.0" ? "localhost" : config_.host) + ":" + std::to_string(boundPort()));
     TH_LOG_INFO("testhub", "Specs directory: " + specs_.specsDir());
-    TH_LOG_INFO("testhub", "Runner: " + config_.runnerLanguage + (config_.runnerCommand.empty() ? "" : " (" + config_.runnerCommand + ")"));
+    TH_LOG_INFO("testhub", "Runner: " + config_.runnerLanguage + (config_.runnerCommand.empty() ? "" : " (" + config_.runnerCommand + ")") +
+                           (runnerBridge_->poolSize() > 1 ? " x" + std::to_string(runnerBridge_->poolSize()) + " (pool)" : ""));
     if (auth_.enabled()) {
         TH_LOG_INFO("testhub", std::string("Auth: Bearer token required for ") + (config_.authProtectReads ? "all API requests and WebSocket" : "write operations"));
     } else {

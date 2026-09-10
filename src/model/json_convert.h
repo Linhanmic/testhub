@@ -254,6 +254,25 @@ inline Json toJson(const RunnerStatus& s) {
     obj["started_at"] = TimeUtil::toIso8601(s.startedAt);
     obj["restart_count"] = s.restartCount;
     if (!s.lastError.empty()) obj["last_error"] = s.lastError;
+    obj["pool_size"] = s.poolSize;
+    obj["alive"] = s.aliveCount;
+    obj["busy"] = s.busyCount;
+    Json slots = Json::array();
+    for (const auto& slot : s.slots) {
+        Json o = Json::object();
+        o["index"] = slot.index;
+        o["state"] = runnerStateToString(slot.state);
+        o["pid"] = slot.pid;
+        o["version"] = slot.version;
+        o["restart_count"] = slot.restartCount;
+        o["steps_executed"] = static_cast<double>(slot.stepsExecuted);
+        o["busy"] = slot.busy;
+        if (!slot.lastError.empty()) o["last_error"] = slot.lastError;
+        o["started_at"] = TimeUtil::toIso8601(slot.startedAt);
+        o["last_heartbeat"] = TimeUtil::toIso8601(slot.lastHeartbeat);
+        slots.push(o);
+    }
+    obj["runners"] = slots;
     return obj;
 }
 

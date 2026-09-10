@@ -252,19 +252,39 @@ struct TestInfo {
 };
 
 /**
- * Runner 状态
+ * Runner 池中单个槽位（一个 Runner 进程）的状态
+ */
+struct RunnerSlotStatus {
+    int index = 0;
+    RunnerState state = RunnerState::DISCONNECTED;
+    int pid = 0;
+    std::string version;
+    int restartCount = 0;
+    unsigned long long stepsExecuted = 0;
+    bool busy = false;                 // 正被某个场景独占
+    std::string lastError;
+    TimePoint startedAt;
+    TimePoint lastHeartbeat;
+};
+
+/**
+ * Runner 状态（池的聚合视图 + 各槽位明细）
  */
 struct RunnerStatus {
     RunnerState state = RunnerState::DISCONNECTED;
     std::string language;
     std::string command;
-    int pid = 0;
+    int pid = 0;                       // 首个存活槽位的 PID
     std::string version;
     std::vector<std::string> implementedSteps;
     TimePoint lastHeartbeat;
     TimePoint startedAt;
-    int restartCount = 0;
+    int restartCount = 0;              // 所有槽位重启次数之和
     std::string lastError;
+    int poolSize = 1;
+    int aliveCount = 0;
+    int busyCount = 0;
+    std::vector<RunnerSlotStatus> slots;
 };
 
 /**

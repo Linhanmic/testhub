@@ -47,6 +47,15 @@ struct TestHubConfig {
     bool autoRestartRunner = true;
     int runnerMaxRestarts = 5;
     int mockDelayMs = 0;
+    int runnerPoolSize = 0;        // Runner 进程数；0 表示跟随 maxConcurrentTests
+
+    /**
+     * 实际生效的 Runner 池大小
+     */
+    int effectiveRunnerPoolSize() const {
+        int n = runnerPoolSize > 0 ? runnerPoolSize : maxConcurrentTests;
+        return n < 1 ? 1 : n;
+    }
 
     // 执行
     int maxConcurrentTests = 1;

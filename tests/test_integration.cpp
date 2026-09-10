@@ -12,6 +12,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -840,4 +841,87 @@ TEST_CASE("integration: results persist across server restarts") {
     }
     std::error_code ec;
     fs::remove_all(resultsDir, ec);
+}
+
+TEST_CASE("integration: python runner pool runs concurrent tests in separate processes") {
+    if (std::system("python3 -c 'import sys' >/dev/null 2>&1") != 0) {
+        std::cout << "    (python3 not available; skipping)\n";
+        return;
+    }
+    std::string runnerDir = std::string(TESTHUB_SOURCE_DIR) + "/runners/python";
+    Server s("", [&](TestHubConfig& cfg) {
+        cfg.runnerLanguage = "python";
+        cfg.runnerCommand = "python3 " + runnerDir + "/testhub_runner.py";
+        cfg.projectPath = runnerDir;
+        cfg.maxConcurrentTests = 2;
+        cfg.runnerPoolSize = 0;   // 跟随并发数 -> 2 个进程
+    });
+    Json runner = request(s.port, "GET", "/api/v1/runner/status").json();
+    REQUIRE_EQ(runner["pool_size"].asInt(), 2);
+    REQUIRE_EQ(runner["alive"].asInt(), 2);
+    CHECK_EQ(runner["state"].asString(), std::string("connected"));
+    REQUIRE_EQ(runner["runners"].asArray().size(), static_cast<size_t>(2));
+    CHECK(runner["runners"][0]["pid"].asInt() > 0);
+    CHECK(runner["runners"][0]["pid"].asInt() != runner["runners"][1]["pid"].asInt());
+    CHECK(runner["step_count"].asInt() > 0);
+
+    // 每个场景等待 0.8 秒；两个测试若真正并行，总耗时应远小于串行的 1.6 秒
+    FileUtil::writeFile(s.specsDir + "/parallel.spec",
+                        "# 并行\n\n## 慢场景\n* 等待 \"0.8\" 秒\n* 输入第一个数 \"1\"\n* 输入第二个数 \"2\"\n* 点击加号\n* 结果应该是 \"3\"\n");
+    auto start = std::chrono::steady_clock::now();
+    HttpResult a = request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["parallel.spec"],"name":"pool-a"})");
+    HttpResult b = request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["parallel.spec"],"name":"pool-b"})");
+    REQUIRE_EQ(a.status, 202);
+    REQUIRE_EQ(b.status, 202);
+    Json ra = s.waitForTerminal(a.json()["test_id"].asString(), 15000);
+    Json rb = s.waitForTerminal(b.json()["test_id"].asString(), 15000);
+    double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    CHECK_EQ(ra["state"].asString(), std::string("passed"));
+    CHECK_EQ(rb["state"].asString(), std::string("passed"));
+    CHECK_MSG(seconds < 1.5, "two 0.8 s tests took " + std::to_string(seconds) + " s; expected parallel execution");
+
+    runner = request(s.port, "GET", "/api/v1/runner/status").json();
+    CHECK_EQ(runner["busy"].asInt(), 0);
+    CHECK(runner["runners"][0]["steps_executed"].asNumber() > 0);
+    CHECK(runner["runners"][1]["steps_executed"].asNumber() > 0);
+
+    // 外部杀掉槽位 0 的进程（`sh -c` 包装进程）：真正的 python 进程会成为孤儿并继续持有管道。
+    // 槽位应在下次使用时自愈，且孤儿进程组被清理，其他槽位不受影响。
+    int killedPid = runner["runners"][0]["pid"].asInt();
+    REQUIRE(::kill(killedPid, SIGKILL) == 0);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline &&
+           request(s.port, "GET", "/api/v1/runner/status").json()["alive"].asInt() != 1) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    runner = request(s.port, "GET", "/api/v1/runner/status").json();
+    CHECK_EQ(runner["alive"].asInt(), 1);
+    CHECK_EQ(runner["state"].asString(), std::string("connected"));   // 降级但可用
+    CHECK_EQ(runner["runners"][0]["state"].asString(), std::string("error"));
+    CHECK(runner["runners"][0]["last_error"].asString().find("restarted on next use") != std::string::npos);
+
+    // 两个并发测试：其中一个必须落在死掉的槽位上并触发重启
+    a = request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["parallel.spec"],"name":"heal-a"})");
+    b = request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["parallel.spec"],"name":"heal-b"})");
+    ra = s.waitForTerminal(a.json()["test_id"].asString(), 15000);
+    rb = s.waitForTerminal(b.json()["test_id"].asString(), 15000);
+    CHECK_EQ(ra["state"].asString(), std::string("passed"));
+    CHECK_EQ(rb["state"].asString(), std::string("passed"));
+    runner = request(s.port, "GET", "/api/v1/runner/status").json();
+    CHECK_EQ(runner["alive"].asInt(), 2);
+    CHECK_EQ(runner["restart_count"].asInt(), 1);
+    CHECK_EQ(runner["runners"][0]["restart_count"].asInt(), 1);
+    CHECK(runner["runners"][0]["pid"].asInt() != killedPid);
+    CHECK_EQ(runner["runners"][1]["restart_count"].asInt(), 0);
+    // 被杀进程的进程组（含孤儿 python）已不存在
+    CHECK(::kill(-killedPid, 0) != 0);
+
+    // 手动重启：两个进程都被替换，PID 变化
+    int oldPid0 = runner["runners"][0]["pid"].asInt();
+    HttpResult restart = request(s.port, "POST", "/api/v1/runner/restart", "{}");
+    CHECK_EQ(restart.status, 200);
+    CHECK(restart.json()["restarted"].asBool());
+    CHECK_EQ(restart.json()["alive"].asInt(), 2);
+    CHECK(restart.json()["runners"][0]["pid"].asInt() != oldPid0);
+    CHECK_EQ(restart.json()["restart_count"].asInt(), 3);
 }
