@@ -1,1 +1,0 @@
-/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/testhub.dir/src/main.cpp.o -o testhub  libtesthub_core.a 
