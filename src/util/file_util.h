@@ -21,7 +21,7 @@ public:
      * 读取文件内容
      */
     static std::string readFile(const std::string& filePath) {
-        std::ifstream file(filePath);
+        std::ifstream file(filePath, std::ios::binary);
         if (!file.is_open()) {
             return "";
         }
@@ -35,13 +35,21 @@ public:
      * 写入文件内容
      */
     static bool writeFile(const std::string& filePath, const std::string& content) {
-        std::ofstream file(filePath);
+        std::ofstream file(filePath, std::ios::binary);
         if (!file.is_open()) {
             return false;
         }
         
         file << content;
-        return true;
+        return static_cast<bool>(file);
+    }
+
+    /**
+     * 删除文件（不存在时返回 false）
+     */
+    static bool deleteFile(const std::string& filePath) {
+        std::error_code ec;
+        return std::filesystem::remove(filePath, ec) && !ec;
     }
 
     /**

@@ -1,159 +1,95 @@
 /*
  * TestHub - 事件总线
- * 发布/订阅模式的事件系统
+ * 发布/订阅模式的事件系统。事件在独立的分发线程中按顺序投递给处理器，
+ * 因此发布方可以在持锁状态下安全发布，处理器也不会阻塞执行引擎。
+ * 同时保留最近 N 条事件的环形历史，供 UI 与 API 回放。
  */
 
 #pragma once
 
 #include "../model/types.h"
 
-#include <string>
-#include <vector>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
-#include <memory>
-#include <functional>
-#include <algorithm>
+#include <string>
+#include <thread>
+#include <vector>
 
 namespace testhub {
 
-/**
- * 事件总线
- * 支持发布/订阅模式的事件系统
- */
 class EventBus {
 public:
-    /**
-     * 获取单例实例
-     */
     static EventBus& getInstance() {
         static EventBus instance;
         return instance;
     }
 
     /**
-     * 订阅事件
-     * @param eventType 事件类型
-     * @param handler 事件处理器
-     * @return 处理器 ID（用于取消订阅）
+     * 订阅事件（eventType 为 "*" 表示所有事件，支持前缀 "test.*" 形式）
+     * @return 处理器 ID
      */
-    std::string subscribe(const std::string& eventType, EventHandler handler) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        
-        std::string handlerId = generateHandlerId();
-        handlers_[eventType].push_back({handlerId, handler});
-        
-        return handlerId;
-    }
+    std::string subscribe(const std::string& eventType, EventHandler handler);
+
+    void unsubscribe(const std::string& handlerId);
+    void unsubscribe(const std::string& eventType, const std::string& handlerId) { (void)eventType; unsubscribe(handlerId); }
 
     /**
-     * 取消订阅
-     * @param eventType 事件类型
-     * @param handlerId 处理器 ID
+     * 发布事件（异步投递）
      */
-    void unsubscribe(const std::string& eventType, const std::string& handlerId) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        
-        auto it = handlers_.find(eventType);
-        if (it != handlers_.end()) {
-            auto& handlers = it->second;
-            handlers.erase(
-                std::remove_if(handlers.begin(), handlers.end(),
-                    [&handlerId](const HandlerEntry& entry) {
-                        return entry.id == handlerId;
-                    }),
-                handlers.end()
-            );
-        }
-    }
+    void publish(const Event& event);
 
     /**
-     * 发布事件
-     * @param event 事件对象
+     * 等待队列中所有事件被投递完成（主要用于测试与优雅停机）
      */
-    void publish(const Event& event) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        
-        // 通知特定类型的处理器
-        auto it = handlers_.find(event.type);
-        if (it != handlers_.end()) {
-            for (const auto& entry : it->second) {
-                try {
-                    entry.handler(event);
-                } catch (...) {
-                    // 忽略处理器异常
-                }
-            }
-        }
-        
-        // 通知通配符处理器
-        auto wildcardIt = handlers_.find("*");
-        if (wildcardIt != handlers_.end()) {
-            for (const auto& entry : wildcardIt->second) {
-                try {
-                    entry.handler(event);
-                } catch (...) {
-                    // 忽略处理器异常
-                }
-            }
-        }
-    }
+    void waitForIdle(int timeoutMs = 5000);
 
     /**
-     * 清除所有处理器
+     * 最近的事件（最新在末尾）
      */
-    void clear() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        handlers_.clear();
-    }
+    std::vector<Event> recentEvents(size_t limit = 100, const std::string& testId = "") const;
 
-    /**
-     * 获取处理器数量
-     */
-    size_t getHandlerCount(const std::string& eventType = "") const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        
-        if (eventType.empty()) {
-            size_t count = 0;
-            for (const auto& pair : handlers_) {
-                count += pair.second.size();
-            }
-            return count;
-        }
-        
-        auto it = handlers_.find(eventType);
-        if (it != handlers_.end()) {
-            return it->second.size();
-        }
-        return 0;
-    }
+    void setHistoryLimit(size_t limit);
+
+    void clear();
+    size_t getHandlerCount(const std::string& eventType = "") const;
+    unsigned long long publishedCount() const { return published_; }
 
 private:
-    EventBus() = default;
-    ~EventBus() = default;
+    EventBus();
+    ~EventBus();
     EventBus(const EventBus&) = delete;
     EventBus& operator=(const EventBus&) = delete;
 
     struct HandlerEntry {
         std::string id;
+        std::string pattern;
         EventHandler handler;
     };
 
-    // 处理器映射
-    std::map<std::string, std::vector<HandlerEntry>> handlers_;
-    
-    // 互斥锁
-    mutable std::mutex mutex_;
-    
-    // 处理器 ID 计数器
+    static bool matches(const std::string& pattern, const std::string& type);
+
+    void dispatchLoop();
+
+    mutable std::mutex handlersMutex_;
+    std::vector<HandlerEntry> handlers_;
     int handlerCounter_ = 0;
 
-    /**
-     * 生成处理器 ID
-     */
-    std::string generateHandlerId() {
-        return "handler_" + std::to_string(++handlerCounter_);
-    }
+    mutable std::mutex queueMutex_;
+    std::condition_variable queueCv_;
+    std::condition_variable idleCv_;
+    std::deque<Event> queue_;
+    bool dispatching_ = false;
+    std::atomic<bool> stop_{false};
+    std::thread dispatcher_;
+
+    mutable std::mutex historyMutex_;
+    std::deque<Event> history_;
+    size_t historyLimit_ = 500;
+    std::atomic<unsigned long long> published_{0};
 };
 
 /**
@@ -166,7 +102,6 @@ inline void publishEvent(const std::string& type, const std::string& testId,
     event.testId = testId;
     event.timestamp = std::chrono::system_clock::now();
     event.data = data;
-    
     EventBus::getInstance().publish(event);
 }
 

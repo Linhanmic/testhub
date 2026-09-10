@@ -5,13 +5,12 @@
 
 #pragma once
 
+#include <chrono>
+#include <functional>
+#include <map>
+#include <optional>
 #include <string>
 #include <vector>
-#include <map>
-#include <chrono>
-#include <optional>
-#include <functional>
-#include <any>
 
 namespace testhub {
 
@@ -27,6 +26,7 @@ enum class TestState {
     RUNNING,     // 运行中
     PASSED,      // 通过
     FAILED,      // 失败
+    SKIPPED,     // 跳过
     CANCELLED,   // 已取消
     TEST_ERROR   // 错误
 };
@@ -62,10 +62,11 @@ inline std::string testStateToString(TestState state) {
         case TestState::RUNNING: return "running";
         case TestState::PASSED: return "passed";
         case TestState::FAILED: return "failed";
+        case TestState::SKIPPED: return "skipped";
         case TestState::CANCELLED: return "cancelled";
         case TestState::TEST_ERROR: return "error";
-        default: return "unknown";
     }
+    return "unknown";
 }
 
 inline TestState stringToTestState(const std::string& str) {
@@ -73,9 +74,14 @@ inline TestState stringToTestState(const std::string& str) {
     if (str == "running") return TestState::RUNNING;
     if (str == "passed") return TestState::PASSED;
     if (str == "failed") return TestState::FAILED;
+    if (str == "skipped") return TestState::SKIPPED;
     if (str == "cancelled") return TestState::CANCELLED;
-    if (str == "error") return TestState::TEST_ERROR;
     return TestState::TEST_ERROR;
+}
+
+inline bool isTerminalState(TestState state) {
+    return state == TestState::PASSED || state == TestState::FAILED || state == TestState::SKIPPED ||
+           state == TestState::CANCELLED || state == TestState::TEST_ERROR;
 }
 
 inline std::string priorityToString(Priority p) {
@@ -84,8 +90,8 @@ inline std::string priorityToString(Priority p) {
         case Priority::NORMAL: return "normal";
         case Priority::HIGH: return "high";
         case Priority::URGENT: return "urgent";
-        default: return "normal";
     }
+    return "normal";
 }
 
 inline Priority stringToPriority(const std::string& str) {
@@ -94,6 +100,19 @@ inline Priority stringToPriority(const std::string& str) {
     if (str == "urgent") return Priority::URGENT;
     return Priority::NORMAL;
 }
+
+inline std::string runnerStateToString(RunnerState state) {
+    switch (state) {
+        case RunnerState::DISCONNECTED: return "disconnected";
+        case RunnerState::CONNECTING: return "connecting";
+        case RunnerState::CONNECTED: return "connected";
+        case RunnerState::BUSY: return "busy";
+        case RunnerState::RUNNER_ERROR: return "error";
+    }
+    return "unknown";
+}
+
+using TimePoint = std::chrono::system_clock::time_point;
 
 // ============================================================
 // 数据模型
@@ -104,15 +123,18 @@ inline Priority stringToPriority(const std::string& str) {
  */
 struct TestRequest {
     std::string id;
-    std::vector<std::string> specFiles;
-    std::vector<std::string> tags;
+    std::string name;                        // 可选的人类可读名称
+    std::vector<std::string> specFiles;      // 文件或目录（相对于 specs 目录或绝对路径）
+    std::vector<std::string> tags;           // 标签过滤表达式（全部匹配）
+    std::vector<std::string> scenarios;      // 场景名过滤（任一匹配）
     std::string environment = "default";
     int parallelStreams = 1;
     Priority priority = Priority::NORMAL;
+    int timeoutMs = 0;                       // 0 表示使用默认值
+    bool failFast = false;                   // 首个场景失败即停止
     std::map<std::string, std::string> metadata;
-    
-    // 回调 URL（可选）
-    std::string callbackUrl;
+    std::string callbackUrl;                 // 可选的完成回调 URL
+    std::string submittedBy;
 };
 
 /**
@@ -120,10 +142,14 @@ struct TestRequest {
  */
 struct StepResult {
     std::string stepText;
+    std::string parameterizedText;
     TestState state = TestState::PASSED;
     std::string errorMessage;
     std::string stackTrace;
-    double duration = 0.0;
+    double duration = 0.0;  // 秒
+    std::vector<std::string> messages;   // Runner 写回的日志
+    std::vector<StepResult> conceptSteps;
+    bool isConcept = false;
 };
 
 /**
@@ -131,10 +157,16 @@ struct StepResult {
  */
 struct ScenarioResult {
     std::string scenarioName;
+    std::vector<std::string> tags;
     TestState state = TestState::PASSED;
+    std::vector<StepResult> contextSteps;
     std::vector<StepResult> stepResults;
+    std::vector<StepResult> teardownSteps;
     std::string errorMessage;
     double duration = 0.0;
+    int dataRowIndex = -1;  // 数据表驱动时的行号（-1 表示无）
+    std::map<std::string, std::string> dataRow;
+    int lineNumber = 0;
 };
 
 /**
@@ -143,14 +175,19 @@ struct ScenarioResult {
 struct SpecResult {
     std::string specFile;
     std::string specName;
+    std::vector<std::string> tags;
     TestState state = TestState::PASSED;
     std::vector<ScenarioResult> scenarioResults;
     std::string errorMessage;
     double duration = 0.0;
+    int totalScenarios = 0;
+    int passedScenarios = 0;
+    int failedScenarios = 0;
+    int skippedScenarios = 0;
 };
 
 /**
- * 测试状态
+ * 测试状态（运行中的快照）
  */
 struct TestStatus {
     std::string testId;
@@ -163,12 +200,14 @@ struct TestStatus {
     int executedScenarios = 0;
     int passedScenarios = 0;
     int failedScenarios = 0;
+    int skippedScenarios = 0;
     double progress = 0.0;
     std::string currentSpec;
     std::string currentScenario;
     std::string currentStep;
-    std::chrono::system_clock::time_point startTime;
-    std::chrono::system_clock::time_point endTime;
+    TimePoint submitTime;
+    TimePoint startTime;
+    TimePoint endTime;
     std::vector<std::string> errors;
     std::vector<std::string> warnings;
 };
@@ -183,8 +222,12 @@ struct TestResult {
     std::vector<std::string> errors;
     std::vector<std::string> warnings;
     double totalDuration = 0.0;
-    std::chrono::system_clock::time_point startTime;
-    std::chrono::system_clock::time_point endTime;
+    TimePoint startTime;
+    TimePoint endTime;
+    int totalScenarios = 0;
+    int passedScenarios = 0;
+    int failedScenarios = 0;
+    int skippedScenarios = 0;
 };
 
 /**
@@ -192,12 +235,20 @@ struct TestResult {
  */
 struct TestInfo {
     std::string testId;
-    TestState state;
+    std::string name;
+    TestState state = TestState::QUEUED;
     std::vector<std::string> specFiles;
     std::vector<std::string> tags;
-    double progress;
-    std::chrono::system_clock::time_point submitTime;
-    std::chrono::system_clock::time_point startTime;
+    Priority priority = Priority::NORMAL;
+    double progress = 0.0;
+    TimePoint submitTime;
+    TimePoint startTime;
+    TimePoint endTime;
+    int totalScenarios = 0;
+    int passedScenarios = 0;
+    int failedScenarios = 0;
+    int skippedScenarios = 0;
+    double duration = 0.0;
 };
 
 /**
@@ -206,10 +257,14 @@ struct TestInfo {
 struct RunnerStatus {
     RunnerState state = RunnerState::DISCONNECTED;
     std::string language;
+    std::string command;
     int pid = 0;
     std::string version;
     std::vector<std::string> implementedSteps;
-    std::chrono::system_clock::time_point lastHeartbeat;
+    TimePoint lastHeartbeat;
+    TimePoint startedAt;
+    int restartCount = 0;
+    std::string lastError;
 };
 
 /**
@@ -227,25 +282,8 @@ struct StepValue {
 struct Event {
     std::string type;
     std::string testId;
-    std::chrono::system_clock::time_point timestamp;
+    TimePoint timestamp;
     std::map<std::string, std::string> data;
-};
-
-/**
- * 缓存文件请求
- */
-struct CacheFileRequest {
-    enum class Status {
-        OPENED,
-        CHANGED,
-        CLOSED,
-        CREATED,
-        DELETED
-    };
-    
-    std::string filePath;
-    std::string content;
-    Status status;
 };
 
 // ============================================================
@@ -253,6 +291,8 @@ struct CacheFileRequest {
 // ============================================================
 
 namespace EventType {
+    const std::string SERVER_STARTED = "server.started";
+    const std::string SERVER_STOPPING = "server.stopping";
     const std::string TEST_SUBMITTED = "test.submitted";
     const std::string TEST_STARTED = "test.started";
     const std::string TEST_COMPLETED = "test.completed";
@@ -264,10 +304,13 @@ namespace EventType {
     const std::string SCENARIO_COMPLETED = "scenario.completed";
     const std::string STEP_STARTED = "step.started";
     const std::string STEP_COMPLETED = "step.completed";
+    const std::string RUNNER_CONNECTING = "runner.connecting";
     const std::string RUNNER_CONNECTED = "runner.connected";
     const std::string RUNNER_DISCONNECTED = "runner.disconnected";
     const std::string RUNNER_ERROR = "runner.error";
+    const std::string RUNNER_LOG = "runner.log";
     const std::string QUEUE_UPDATED = "queue.updated";
+    const std::string SPECS_RELOADED = "specs.reloaded";
 }
 
 // ============================================================
@@ -275,6 +318,5 @@ namespace EventType {
 // ============================================================
 
 using EventHandler = std::function<void(const Event&)>;
-using StepExecutor = std::function<StepResult(const std::string& stepText, const std::vector<std::string>& args)>;
 
 } // namespace testhub

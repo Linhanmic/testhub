@@ -1,24 +1,23 @@
 /*
  * TestHub - 测试队列
- * 优先级队列管理测试任务
+ * 线程安全的优先级队列（同优先级 FIFO），支持取消与阻塞等待
  */
 
 #pragma once
 
 #include "../model/types.h"
 #include "../event/event_bus.h"
+#include "../util/time_util.h"
 
-#include <queue>
-#include <vector>
-#include <set>
-#include <mutex>
-#include <condition_variable>
-#include <optional>
-#include <map>
 #include <algorithm>
-#include <sstream>
-#include <iomanip>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <vector>
 
 namespace testhub {
 
@@ -27,179 +26,160 @@ namespace testhub {
  */
 struct TestTask {
     TestRequest request;
-    std::chrono::system_clock::time_point submitTime;
-    
-    // 用于优先级队列的比较
-    bool operator<(const TestTask& other) const {
-        // 优先级高的排在前面
-        if (request.priority != other.request.priority) {
-            return request.priority < other.request.priority;
-        }
-        // 同优先级按提交时间排序（先提交的排在前面）
-        return submitTime > other.submitTime;
-    }
+    TimePoint submitTime;
+    unsigned long long sequence = 0;
 };
 
 /**
  * 测试队列
- * 管理测试任务的优先级队列
  */
 class TestQueue {
 public:
     TestQueue() = default;
-    ~TestQueue() = default;
+    ~TestQueue() { close(); }
 
     /**
-     * 添加任务到队列
-     * @param request 测试请求
-     * @return 任务 ID
+     * 入队；返回任务 ID（request.id 为空时自动生成）
      */
     std::string enqueue(const TestRequest& request) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        
         TestTask task;
-        task.request = request;
-        task.submitTime = std::chrono::system_clock::now();
-        
-        // 如果没有指定 ID，生成一个
-        if (task.request.id.empty()) {
-            task.request.id = generateTaskId();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            task.request = request;
+            task.submitTime = std::chrono::system_clock::now();
+            task.sequence = ++sequence_;
+            if (task.request.id.empty()) task.request.id = generateTaskId(task.submitTime);
+            // 按优先级降序、序号升序插入
+            auto pos = std::find_if(items_.begin(), items_.end(), [&](const TestTask& t) {
+                return static_cast<int>(t.request.priority) < static_cast<int>(task.request.priority);
+            });
+            items_.insert(pos, task);
         }
-        
-        queue_.push(task);
-        taskIds_.insert(task.request.id);
-        
-        // 发布队列更新事件
-        publishEvent(EventType::QUEUE_UPDATED, "", {
-            {"queue_size", std::to_string(queue_.size())},
-            {"task_id", task.request.id}
+        cv_.notify_one();
+        publishEvent(EventType::QUEUE_UPDATED, task.request.id, {
+            {"queue_size", std::to_string(size())},
+            {"action", "enqueued"}
         });
-        
         return task.request.id;
     }
 
     /**
-     * 从队列取出下一个任务
-     * @return 测试任务（如果队列为空返回 nullopt）
+     * 非阻塞出队
      */
     std::optional<TestTask> dequeue() {
         std::lock_guard<std::mutex> lock(mutex_);
-        
-        if (queue_.empty()) {
-            return std::nullopt;
-        }
-        
-        TestTask task = queue_.top();
-        queue_.pop();
-        taskIds_.erase(task.request.id);
-        
-        return task;
+        if (items_.empty()) return std::nullopt;
+        TestTask t = items_.front();
+        items_.pop_front();
+        return t;
     }
 
     /**
-     * 取消任务
-     * @param taskId 任务 ID
-     * @return 是否成功取消
+     * 阻塞出队，直到有任务、超时或队列关闭
+     */
+    std::optional<TestTask> waitAndDequeue(int timeoutMs) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return closed_ || !items_.empty(); });
+        if (items_.empty()) return std::nullopt;
+        TestTask t = items_.front();
+        items_.pop_front();
+        return t;
+    }
+
+    /**
+     * 取消排队中的任务
      */
     bool cancel(const std::string& taskId) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        
-        // 检查任务是否在队列中
-        if (taskIds_.find(taskId) == taskIds_.end()) {
-            return false;
-        }
-        
-        // 重建队列，排除要取消的任务
-        std::priority_queue<TestTask> newQueue;
-        while (!queue_.empty()) {
-            TestTask task = queue_.top();
-            queue_.pop();
-            
-            if (task.request.id != taskId) {
-                newQueue.push(task);
-            } else {
-                taskIds_.erase(taskId);
-                
-                // 发布取消事件
-                publishEvent(EventType::TEST_CANCELLED, taskId);
+        bool removed = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = std::find_if(items_.begin(), items_.end(), [&](const TestTask& t) { return t.request.id == taskId; });
+            if (it != items_.end()) {
+                items_.erase(it);
+                removed = true;
             }
         }
-        
-        queue_ = std::move(newQueue);
-        return true;
+        if (removed) {
+            publishEvent(EventType::QUEUE_UPDATED, taskId, {{"queue_size", std::to_string(size())}, {"action", "cancelled"}});
+        }
+        return removed;
     }
 
-    /**
-     * 检查任务是否在队列中
-     * @param taskId 任务 ID
-     * @return 是否在队列中
-     */
     bool contains(const std::string& taskId) const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return taskIds_.find(taskId) != taskIds_.end();
+        return std::any_of(items_.begin(), items_.end(), [&](const TestTask& t) { return t.request.id == taskId; });
     }
 
     /**
-     * 获取队列大小
+     * 队列中的位置（0 表示下一个执行）；不在队列返回 -1
      */
+    int position(const std::string& taskId) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        int idx = 0;
+        for (const auto& t : items_) {
+            if (t.request.id == taskId) return idx;
+            ++idx;
+        }
+        return -1;
+    }
+
     size_t size() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return queue_.size();
+        return items_.size();
     }
 
-    /**
-     * 检查队列是否为空
-     */
-    bool empty() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return queue_.empty();
-    }
+    bool empty() const { return size() == 0; }
 
-    /**
-     * 清空队列
-     */
     void clear() {
         std::lock_guard<std::mutex> lock(mutex_);
-        while (!queue_.empty()) {
-            queue_.pop();
-        }
-        taskIds_.clear();
+        items_.clear();
     }
 
     /**
-     * 获取队列中的所有任务 ID
+     * 关闭队列：唤醒所有等待者
      */
+    void close() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            closed_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    void reopen() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        closed_ = false;
+    }
+
+    std::vector<TestTask> snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return std::vector<TestTask>(items_.begin(), items_.end());
+    }
+
     std::vector<std::string> getTaskIds() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return std::vector<std::string>(taskIds_.begin(), taskIds_.end());
+        std::vector<std::string> ids;
+        for (const auto& t : items_) ids.push_back(t.request.id);
+        return ids;
+    }
+
+    /**
+     * 生成任务 ID：test-YYYYMMDD-HHMMSS-NNN
+     */
+    std::string generateTaskId(const TimePoint& tp) {
+        std::string stamp = TimeUtil::formatLocal(tp, "%Y%m%d-%H%M%S");
+        char suffix[8];
+        std::snprintf(suffix, sizeof(suffix), "%03u", static_cast<unsigned>(++idCounter_ % 1000));
+        return "test-" + stamp + "-" + suffix;
     }
 
 private:
-    // 优先级队列
-    std::priority_queue<TestTask> queue_;
-    
-    // 任务 ID 集合（用于快速查找）
-    std::set<std::string> taskIds_;
-    
-    // 互斥锁
+    std::deque<TestTask> items_;
     mutable std::mutex mutex_;
-    
-    // 任务 ID 计数器
-    int taskCounter_ = 0;
-
-    /**
-     * 生成任务 ID
-     */
-    std::string generateTaskId() {
-        auto now = std::chrono::system_clock::now();
-        auto time = std::chrono::system_clock::to_time_t(now);
-        
-        std::ostringstream oss;
-        oss << "test-" << std::put_time(std::localtime(&time), "%Y%m%d-%H%M%S") 
-            << "-" << std::setfill('0') << std::setw(3) << (++taskCounter_ % 1000);
-        
-        return oss.str();
-    }
+    std::condition_variable cv_;
+    bool closed_ = false;
+    unsigned long long sequence_ = 0;
+    unsigned idCounter_ = 0;
 };
 
 } // namespace testhub
