@@ -66,6 +66,7 @@ src/main.cpp               解析 CLI / 配置文件，daemonize，信号处理
 src/testhub.{h,cpp}        TestHubConfig（applyJson/toJson）+ TestHub 门面（start/stop，装配各组件）
 src/server/http_server.*   HTTP/1.1 服务器：accept 轮询 + 工作线程池，路由表，静态资源，升级钩子
 src/server/api_routes.cpp  TestHub::registerApiRoutes() — 全部 REST 端点
+src/server/auth.h          AuthPolicy — Bearer Token 校验（HttpServer 请求过滤器）
 src/server/web_ui.cpp      TestHub::registerWebUi() — 内嵌资源或 --web-dir，SPA 回退
 src/server/websocket_*     RFC 6455 握手/帧编解码，订阅过滤，EventBus 转发
 src/engine/execution_engine.*  提交 → 队列 → worker → 规范/场景/步骤执行 → 结果与事件

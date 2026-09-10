@@ -16,11 +16,12 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 | 持久化 | 已完成的测试以 JSON 落盘（默认 `data/results/`），重启后自动回放历史与统计 |
 | 报表 | 按需导出 JUnit XML（供 Jenkins / GitLab / GitHub Actions 收集）与自包含 HTML 报告；UI 一键下载 |
 | 回调 | 请求携带 `callback_url`，测试结束后 POST JSON 摘要（含失败场景清单与报表链接），失败按指数退避重试 |
+| 鉴权 | 可选 Bearer Token：默认保护写操作，可扩展到读操作与 WebSocket；UI 内置 token 输入 |
 | Runner | 跨平台子进程桥接 + JSON-lines 协议；内置 mock Runner；Python 参考 Runner（装饰器式步骤实现、钩子、数据表、消息）；自动重启；并发测试时场景级独占会话 |
 | 服务端 | 多线程 HTTP/1.1（keep-alive、流水线、Content-Length、超时、`{param}` 路由、CORS、HEAD/OPTIONS、ETag 静态资源、SPA 回退） |
 | 实时性 | 异步事件总线；`/ws/v1/events` WebSocket 推送（按类型/测试 ID 订阅、历史回放） |
 | Web UI | 内嵌单页应用：总览、提交测试、测试记录、结果树、运行中实时执行树、规范浏览/编辑/校验、Runner 状态、事件流、暗色模式 |
-| 质量 | 61 个单元测试 + 10 个 HTTP/WS 集成测试 + 7 个 Python 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`） |
+| 质量 | 63 个单元测试 + 12 个 HTTP/WS 集成测试 + 7 个 Python 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`） |
 
 ## 快速开始
 
@@ -152,6 +153,8 @@ WebSocket 连接后发送 `{"action":"subscribe","events":["test.*","scenario.*"
     --no-persist           不持久化结果，仅保存在内存
     --public-url <url>     回调载荷中链接的公开地址前缀
     --no-callbacks         禁用 callback_url 完成回调
+    --auth-token <token>   启用 Bearer Token 鉴权（或环境变量 TESTHUB_AUTH_TOKEN）
+    --auth-protect-reads   鉴权同时覆盖 GET 与 WebSocket
     --log-level <level>    debug | info | warn | error | off
     --log-file <file>      日志文件
     --no-ui                不提供 Web UI

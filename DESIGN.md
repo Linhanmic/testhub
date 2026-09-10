@@ -84,6 +84,14 @@ TestHub 复用 Gauge 的规范语法（`.spec` / `.cpt`），便于迁移已有�
 - `spec_files` 为相对规范目录的路径，可为目录；空数组表示全部规范。
 - 规范写接口拒绝 `..` 与非 `.spec/.md/.cpt` 扩展名。
 
+### 3.2a AuthPolicy（`src/server/auth.h`）
+
+- 配置 `server.auth_token` 非空即启用；通过 `HttpServer::setRequestFilter()` 在路由之前统一校验（WebSocket 升级同样经过过滤器）。
+- 默认只保护写操作（POST/PUT/PATCH/DELETE）；`server.auth_protect_reads=true` 时 GET/HEAD 与 WebSocket 也需要 token。静态 UI、`/api/v1/health` 与 CORS 预检始终放行。
+- 凭据来源：`Authorization: Bearer <token>`、`X-Auth-Token`；GET/HEAD/WebSocket 额外接受查询参数 `access_token`（浏览器下载链接与 WebSocket 无法自定义头）。比较使用常量时间算法。
+- 失败返回 `401` + `WWW-Authenticate: Bearer realm="TestHub"`；`GET /health` 暴露 `auth_required` / `auth_protect_reads` 供 UI 决定是否提示输入；`GET /config` 与 `--print-config` 把 token 掩码为 `***`。
+- Web UI 把 token 存于 `localStorage`，请求自动附加 `Authorization`；收到 401 弹出输入框，保存后重连 WebSocket 并重新加载当前页面。
+
 ### 3.3 ExecutionEngine（`src/engine/execution_engine.*`）
 
 ```
@@ -315,7 +323,8 @@ JSON 文件（`--config`），键与 `--print-config` 输出一致：
 
 ```json
 {
-  "server":    {"host":"0.0.0.0","port":8080,"worker_threads":8,"web_ui":true,"web_dir":""},
+  "server":    {"host":"0.0.0.0","port":8080,"worker_threads":8,"web_ui":true,"web_dir":"",
+                "auth_token":"","auth_protect_reads":false},
   "runner":    {"language":"python","command":"","project_path":"runners/python",
                 "connection_timeout":15000,"request_timeout":60000,"auto_restart":true,"max_restarts":5,"mock_delay_ms":0},
   "execution": {"max_concurrent_tests":1,"default_timeout":300000,"step_timeout":60000,"history_limit":200,
@@ -326,7 +335,7 @@ JSON 文件（`--config`），键与 `--print-config` 输出一致：
 }
 ```
 
-优先级：CLI 参数 > 配置文件 > 默认值。
+优先级：CLI 参数 > 环境变量（`TESTHUB_AUTH_TOKEN`）> 配置文件 > 默认值。
 
 ## 7. 目录结构
 
@@ -334,7 +343,7 @@ JSON 文件（`--config`），键与 `--print-config` 输出一致：
 src/
   main.cpp                 CLI、配置合并、daemonize、信号
   testhub.{h,cpp}          TestHubConfig + TestHub 门面
-  server/                  http_server, websocket_server, api_routes, web_ui, web_assets.h
+  server/                  http_server, websocket_server, api_routes, auth.h, web_ui, web_assets.h
   engine/                  execution_engine, result_store, test_queue, tag_filter
   notify/                  callback_notifier（callback_url 投递与重试）
   report/                  report_writer（JUnit XML / HTML）
@@ -353,8 +362,8 @@ cmake/EmbedResources.cmake
 
 ## 8. 质量保障
 
-- **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）；报表（JUnit 结构与计数、转义、空结果、HTML 自包含）。
-- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）。
+- **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405、请求过滤器；鉴权策略（读/写、凭据来源、常量时间比较）；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）；报表（JUnit 结构与计数、转义、空结果、HTML 自包含）。
+- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）、Bearer Token（写保护与全保护两种模式、WebSocket 查询参数）。
 - **协议测试**（`python_runner_protocol`）：以子进程启动 Python Runner，验证 ping/get_steps/execute_step/hook/kill 与错误路径。
 - **CI**：Ubuntu（g++、clang++）与 macOS，`-Wall -Wextra -Wpedantic -Werror`，`ctest`，二进制冒烟（curl）。
 
@@ -363,6 +372,6 @@ cmake/EmbedResources.cmake
 - 结果以单文件 JSON 持久化，适合中小规模历史；海量历史或跨实例查询需要 SQLite/数据库后端。
 - 同一时刻只有一个 Runner 进程；`max_concurrent_tests > 1` 时通过场景级会话锁串行化步骤执行，真正并行需要 Runner 池。
 - 回调仅支持 `http://`（无 TLS）；需要 HTTPS 时请经由本地反向代理或内网中转。
-- 无鉴权；建议在受信网络内部署或置于反向代理之后（计划：Bearer Token）。
+- 鉴权为单一共享 Bearer Token（无用户/角色区分），且服务本身不提供 TLS；公网暴露时请置于 HTTPS 反向代理之后。
 
 详细任务列表见 [TODO.md](TODO.md)。

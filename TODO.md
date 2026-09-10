@@ -5,7 +5,7 @@
 ## 当前状态（v1.1.0）
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
-- 78 个自动化测试全部通过（61 单元 + 10 集成 + 7 Python 协议），GitHub Actions 三平台 CI
+- 82 个自动化测试全部通过（63 单元 + 12 集成 + 7 Python 协议），GitHub Actions 三平台 CI
 - 约 12k 行（含前端、Python Runner、测试）
 
 ## 路线图
@@ -26,10 +26,10 @@
 - [x] 结果持久化：终态记录 JSON 落盘（`data/results/`），启动回放历史与统计，随 history_limit 裁剪
 - [x] 报表导出：`GET /tests/{id}/report?format=junit|html`，UI 详情页一键下载
 - [x] 回调通知：`callback_url` 完成后 POST 摘要，指数退避重试，`callback.*` 事件与状态计数
+- [x] 鉴权：`server.auth_token` Bearer Token（写操作 / 可选全保护），UI token 输入与 401 处理
 
 ### P1 — 下一步（按优先级）
 
-- [ ] **鉴权**：`server.auth_token`，Bearer Token 校验写操作；UI 支持输入 token
 - [ ] **Runner 池**：`max_concurrent_tests > 1` 时启动多个 Runner 进程真正并行（当前为场景级串行）
 - [ ] **Node.js 参考 Runner**：复用 JSON-lines 协议，验证语言无关性
 - [ ] **规范目录监控**：文件变更自动 reload 并推送 `specs.reloaded`
@@ -122,6 +122,15 @@
 - UI：提交表单新增回调 URL、详情页显示回调地址、总览"回调"计数、事件流着色并显示 `url/status/attempts`
 - 测试：HttpClient 单测（解析、真实服务器 POST、404/204、超时、拒绝连接、https 拒绝）、载荷单测；集成测试用第二个 `HttpServer` 作接收端验证 503 → 重试成功与拒绝连接 → 3 次后放弃
 
+### 迭代 11 — Bearer Token 鉴权
+
+- `HttpServer::setRequestFilter()`：路由前统一过滤，WebSocket 升级同样经过；OPTIONS 预检放行
+- `AuthPolicy`（`server/auth.h`）：写操作默认受保护，`auth_protect_reads` 扩展到 GET/HEAD/WS；凭据来自 `Authorization: Bearer`、`X-Auth-Token`，读操作与 WS 可用 `access_token` 查询参数；常量时间比较；401 + `WWW-Authenticate`
+- 配置 `server.auth_token` / `server.auth_protect_reads`，CLI `--auth-token` / `--auth-protect-reads`，环境变量 `TESTHUB_AUTH_TOKEN`；`/config` 与 `--print-config` 掩码 token；启动日志提示鉴权状态；`/health` 暴露 `auth_required` / `auth_protect_reads`
+- UI：侧栏"鉴权"状态按钮与 token 对话框（localStorage），请求自动附加头，401 自动弹窗、保存后重连 WS 并重载页面；报表链接与 WS 在全保护模式下携带 `access_token`
+- 测试：AuthPolicy 单测（读写/路径/凭据来源/常量时间）、过滤器单测；集成测试覆盖两种模式下的 REST、预检、配置掩码、WS 拒绝/放行
+- 浏览器实测：无 token → 弹窗 → 输入后页面与实时连接恢复；错误 token → "token 无效"提示
+
 ---
 
 ## 决策记录
@@ -137,6 +146,7 @@
 | 迭代 8 | 持久化采用“一测试一 JSON 文件”而非 SQLite | 零依赖、可直接用文本工具查看/备份、与 API 输出同构；查询需求复杂时再引入数据库 |
 | 迭代 9 | 报表按需渲染而非随结果落盘 | 结果 JSON 已是事实来源，报表只是视图；避免多份文件不一致，格式演进无需迁移 |
 | 迭代 10 | 回调客户端自研且仅支持 http:// | 保持零依赖；HTTPS 需要 TLS 库，交给反向代理/内网中转更符合守护进程的部署形态 |
+| 迭代 11 | 单一共享 token，默认只保护写操作 | 守护进程多部署在内网/CI；先解决"误操作与未授权写入"，读保护按需开启；多用户/角色留待有明确需求时再做 |
 
 ---
 
@@ -145,7 +155,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 78 个，全部通过；`ctest` 约 2 s |
+| 自动化测试 | 82 个，全部通过；`ctest` 约 2 s |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
-| 代码规模 | 约 13.5k 行（C++ 约 10k，前端约 1.1k，Python 约 0.7k，测试约 2.2k） |
+| 代码规模 | 约 14k 行（C++ 约 10.2k，前端约 1.2k，Python 约 0.7k，测试约 2.4k） |
