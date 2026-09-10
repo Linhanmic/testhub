@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -34,6 +35,39 @@ public:
                       tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                       tm.tm_hour, tm.tm_min, tm.tm_sec, millis);
         return buf;
+    }
+
+    /**
+     * 解析 toIso8601 产生的格式（YYYY-MM-DDTHH:MM:SS[.mmm]Z）；空串或格式错误返回零值
+     */
+    static TimePoint fromIso8601(const std::string& text) {
+        int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0, millis = 0;
+        if (text.size() < 20) return TimePoint{};
+        int n = std::sscanf(text.c_str(), "%4d-%2d-%2dT%2d:%2d:%2d", &year, &month, &day, &hour, &minute, &second);
+        if (n != 6) return TimePoint{};
+        size_t dot = text.find('.', 19);
+        if (dot != std::string::npos) {
+            // 只取前三位小数
+            int scale = 100;
+            for (size_t i = dot + 1; i < text.size() && std::isdigit(static_cast<unsigned char>(text[i])) && scale > 0; ++i) {
+                millis += (text[i] - '0') * scale;
+                scale /= 10;
+            }
+        }
+        std::tm tm{};
+        tm.tm_year = year - 1900;
+        tm.tm_mon = month - 1;
+        tm.tm_mday = day;
+        tm.tm_hour = hour;
+        tm.tm_min = minute;
+        tm.tm_sec = second;
+#ifdef _WIN32
+        std::time_t t = _mkgmtime(&tm);
+#else
+        std::time_t t = timegm(&tm);
+#endif
+        if (t == static_cast<std::time_t>(-1)) return TimePoint{};
+        return std::chrono::system_clock::from_time_t(t) + std::chrono::milliseconds(millis);
     }
 
     /**

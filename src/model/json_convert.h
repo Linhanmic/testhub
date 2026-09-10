@@ -266,6 +266,122 @@ inline Json toJson(const Event& e) {
     return obj;
 }
 
+// ------------------------------------------------------------
+// 反序列化（用于结果持久化的回放）；字段缺失时保留默认值
+// ------------------------------------------------------------
+
+inline std::vector<std::string> stringsFromJson(const Json& json) {
+    std::vector<std::string> out;
+    if (!json.isArray()) return out;
+    for (const auto& v : json.asArray()) if (v.isString()) out.push_back(v.asString());
+    return out;
+}
+
+inline std::map<std::string, std::string> stringMapFromJson(const Json& json) {
+    std::map<std::string, std::string> out;
+    if (!json.isObject()) return out;
+    for (const auto& kv : json.asObject()) out[kv.first] = kv.second.isString() ? kv.second.asString() : kv.second.dump();
+    return out;
+}
+
+inline StepResult stepResultFromJson(const Json& json) {
+    StepResult r;
+    r.stepText = json["step"].asString("");
+    r.parameterizedText = json["parameterized_text"].asString("");
+    r.state = stringToTestState(json["state"].asString("passed"));
+    r.duration = json["duration"].asNumber(0.0);
+    r.errorMessage = json["error"].asString("");
+    r.stackTrace = json["stack_trace"].asString("");
+    r.messages = stringsFromJson(json["messages"]);
+    r.isConcept = json["is_concept"].asBool(false);
+    if (json["concept_steps"].isArray()) {
+        for (const auto& s : json["concept_steps"].asArray()) r.conceptSteps.push_back(stepResultFromJson(s));
+    }
+    return r;
+}
+
+inline ScenarioResult scenarioResultFromJson(const Json& json) {
+    ScenarioResult r;
+    r.scenarioName = json["name"].asString("");
+    r.tags = stringsFromJson(json["tags"]);
+    r.state = stringToTestState(json["state"].asString("passed"));
+    r.duration = json["duration"].asNumber(0.0);
+    r.lineNumber = json["line_number"].asInt(0);
+    r.errorMessage = json["error"].asString("");
+    r.dataRowIndex = json["data_row_index"].asInt(-1);
+    r.dataRow = stringMapFromJson(json["data_row"]);
+    auto readSteps = [&](const char* key, std::vector<StepResult>& out) {
+        if (!json[key].isArray()) return;
+        for (const auto& s : json[key].asArray()) out.push_back(stepResultFromJson(s));
+    };
+    readSteps("context_steps", r.contextSteps);
+    readSteps("steps", r.stepResults);
+    readSteps("teardown_steps", r.teardownSteps);
+    return r;
+}
+
+inline SpecResult specResultFromJson(const Json& json) {
+    SpecResult r;
+    r.specFile = json["file"].asString("");
+    r.specName = json["name"].asString("");
+    r.tags = stringsFromJson(json["tags"]);
+    r.state = stringToTestState(json["state"].asString("passed"));
+    r.duration = json["duration"].asNumber(0.0);
+    r.errorMessage = json["error"].asString("");
+    r.totalScenarios = json["total_scenarios"].asInt(0);
+    r.passedScenarios = json["passed_scenarios"].asInt(0);
+    r.failedScenarios = json["failed_scenarios"].asInt(0);
+    r.skippedScenarios = json["skipped_scenarios"].asInt(0);
+    if (json["scenarios"].isArray()) {
+        for (const auto& s : json["scenarios"].asArray()) r.scenarioResults.push_back(scenarioResultFromJson(s));
+    }
+    return r;
+}
+
+inline TestResult testResultFromJson(const Json& json) {
+    TestResult r;
+    r.testId = json["test_id"].asString("");
+    r.finalState = stringToTestState(json["state"].asString("passed"));
+    r.totalDuration = json["duration"].asNumber(0.0);
+    r.startTime = TimeUtil::fromIso8601(json["start_time"].asString(""));
+    r.endTime = TimeUtil::fromIso8601(json["end_time"].asString(""));
+    r.totalScenarios = json["total_scenarios"].asInt(0);
+    r.passedScenarios = json["passed_scenarios"].asInt(0);
+    r.failedScenarios = json["failed_scenarios"].asInt(0);
+    r.skippedScenarios = json["skipped_scenarios"].asInt(0);
+    r.errors = stringsFromJson(json["errors"]);
+    r.warnings = stringsFromJson(json["warnings"]);
+    if (json["specs"].isArray()) {
+        for (const auto& s : json["specs"].asArray()) r.specResults.push_back(specResultFromJson(s));
+    }
+    return r;
+}
+
+inline TestStatus testStatusFromJson(const Json& json) {
+    TestStatus s;
+    s.testId = json["test_id"].asString("");
+    s.state = stringToTestState(json["state"].asString("queued"));
+    s.progress = json["progress"].asNumber(0.0);
+    s.totalSpecs = json["total_specs"].asInt(0);
+    s.executedSpecs = json["executed_specs"].asInt(0);
+    s.passedSpecs = json["passed_specs"].asInt(0);
+    s.failedSpecs = json["failed_specs"].asInt(0);
+    s.totalScenarios = json["total_scenarios"].asInt(0);
+    s.executedScenarios = json["executed_scenarios"].asInt(0);
+    s.passedScenarios = json["passed_scenarios"].asInt(0);
+    s.failedScenarios = json["failed_scenarios"].asInt(0);
+    s.skippedScenarios = json["skipped_scenarios"].asInt(0);
+    s.currentSpec = json["current_spec"].asString("");
+    s.currentScenario = json["current_scenario"].asString("");
+    s.currentStep = json["current_step"].asString("");
+    s.submitTime = TimeUtil::fromIso8601(json["submit_time"].asString(""));
+    s.startTime = TimeUtil::fromIso8601(json["start_time"].asString(""));
+    s.endTime = TimeUtil::fromIso8601(json["end_time"].asString(""));
+    s.errors = stringsFromJson(json["errors"]);
+    s.warnings = stringsFromJson(json["warnings"]);
+    return s;
+}
+
 /**
  * 从 JSON 解析测试请求；失败时返回 false 并填充 error
  */

@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "result_store.h"
 #include "test_queue.h"
 #include "tag_filter.h"
 #include "../model/types.h"
@@ -30,6 +31,7 @@ struct EngineConfig {
     int defaultTimeoutMs = 300000;      // 单个测试的默认超时
     int stepTimeoutMs = 60000;          // 单个步骤超时
     size_t historyLimit = 200;          // 保留的历史结果数量
+    std::string resultsDir;             // 结果持久化目录；为空表示仅保存在内存
     std::map<std::string, std::string> environment;  // 传递给 Runner 的环境
 };
 
@@ -109,6 +111,7 @@ public:
     size_t clearHistory();
 
     EngineStats stats() const;
+    const ResultStore& store() const { return store_; }
     size_t queueSize() const { return queue_.size(); }
     int queuePosition(const std::string& testId) const { return queue_.position(testId); }
 
@@ -119,6 +122,8 @@ private:
     RunnerBridge& runner_;
     EngineConfig config_;
     TestQueue queue_;
+    ResultStore store_;
+    bool historyLoaded_ = false;
 
     std::atomic<bool> running_{false};
     std::atomic<bool> stopRequested_{false};
@@ -163,6 +168,8 @@ private:
     void updateStatus(const RunContext& ctx);
     void publish(const std::string& type, const std::string& testId, const std::map<std::string, std::string>& data = {});
     void trimHistory();
+    void loadHistory();
+    void persist(const std::string& testId);
     bool checkTimeout(RunContext& ctx);
 };
 

@@ -48,6 +48,7 @@ struct TestHubConfig {
     int defaultTimeout = 300000;
     int stepTimeout = 60000;
     size_t historyLimit = 200;
+    std::string resultsDir = "data/results";   // 结果持久化目录；空表示禁用
     std::map<std::string, std::string> environment;
 
     // 规范

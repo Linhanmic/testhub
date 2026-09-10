@@ -37,6 +37,7 @@ void TestHubConfig::applyJson(const Json& json) {
     if (execution["default_timeout"].isNumber()) defaultTimeout = execution["default_timeout"].asInt();
     if (execution["step_timeout"].isNumber()) stepTimeout = execution["step_timeout"].asInt();
     if (execution["history_limit"].isNumber()) historyLimit = static_cast<size_t>(execution["history_limit"].asInt());
+    if (execution["results_dir"].isString()) resultsDir = execution["results_dir"].asString();
     if (execution["environment"].isObject()) {
         for (const auto& kv : execution["environment"].asObject()) {
             environment[kv.first] = kv.second.isString() ? kv.second.asString() : kv.second.dump();
@@ -80,6 +81,7 @@ Json TestHubConfig::toJson() const {
     execution["default_timeout"] = defaultTimeout;
     execution["step_timeout"] = stepTimeout;
     execution["history_limit"] = static_cast<int>(historyLimit);
+    execution["results_dir"] = resultsDir;
     execution["environment"] = testhub::toJson(environment);
     j["execution"] = execution;
 
@@ -134,6 +136,7 @@ bool TestHub::initialize(const TestHubConfig& config) {
     engineConfig.defaultTimeoutMs = config_.defaultTimeout;
     engineConfig.stepTimeoutMs = config_.stepTimeout;
     engineConfig.historyLimit = config_.historyLimit;
+    engineConfig.resultsDir = config_.resultsDir;
     engineConfig.environment = config_.environment;
     engine_->configure(engineConfig);
 

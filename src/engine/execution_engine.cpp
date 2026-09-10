@@ -38,11 +38,65 @@ void ExecutionEngine::configure(const EngineConfig& config) {
     config_ = config;
     if (config_.workerThreads < 1) config_.workerThreads = 1;
     if (config_.historyLimit < 1) config_.historyLimit = 1;
+    if (store_.dir() != config_.resultsDir) {
+        store_ = ResultStore(config_.resultsDir);
+        historyLoaded_ = false;
+    }
+}
+
+void ExecutionEngine::loadHistory() {
+    if (historyLoaded_) return;
+    historyLoaded_ = true;
+    if (!store_.enabled()) return;
+    store_.prepare();
+    std::vector<TestRecord> records = store_.loadAll();
+    {
+        std::lock_guard<std::mutex> lock(recordsMutex_);
+        for (auto& r : records) {
+            const std::string id = r.status.testId;
+            if (records_.count(id)) continue;
+            records_[id] = std::move(r);
+            order_.push_back(id);
+        }
+    }
+    {
+        // 历史记录计入统计，使总览页在重启后仍反映累计情况
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        for (const auto& r : records) {
+            if (!r.hasResult) continue;
+            stats_.completed++;
+            switch (r.result.finalState) {
+                case TestState::PASSED: case TestState::SKIPPED: stats_.passed++; break;
+                case TestState::FAILED: stats_.failed++; break;
+                case TestState::CANCELLED: stats_.cancelled++; break;
+                default: stats_.errored++; break;
+            }
+            stats_.totalScenarios += r.result.totalScenarios;
+            stats_.passedScenarios += r.result.passedScenarios;
+            stats_.failedScenarios += r.result.failedScenarios;
+            stats_.skippedScenarios += r.result.skippedScenarios;
+            stats_.totalDuration += r.result.totalDuration;
+        }
+    }
+    trimHistory();
+}
+
+void ExecutionEngine::persist(const std::string& testId) {
+    if (!store_.enabled()) return;
+    TestRecord copy;
+    {
+        std::lock_guard<std::mutex> lock(recordsMutex_);
+        auto it = records_.find(testId);
+        if (it == records_.end() || !isTerminalState(it->second.status.state)) return;
+        copy = it->second;
+    }
+    store_.save(copy);
 }
 
 void ExecutionEngine::start() {
     if (running_) return;
     stopRequested_ = false;
+    loadHistory();
     queue_.reopen();
     running_ = true;
     for (int i = 0; i < config_.workerThreads; ++i) {
@@ -161,6 +215,7 @@ bool ExecutionEngine::cancel(const std::string& testId) {
             stats_.completed++;
             stats_.cancelled++;
         }
+        persist(testId);
         publish(EventType::TEST_CANCELLED, testId, {{"stage", "queued"}});
         return true;
     }
@@ -270,50 +325,61 @@ size_t ExecutionEngine::count(const std::string& state) const {
 }
 
 bool ExecutionEngine::remove(const std::string& testId) {
-    std::lock_guard<std::mutex> lock(recordsMutex_);
-    auto it = records_.find(testId);
-    if (it == records_.end() || !isTerminalState(it->second.status.state)) return false;
-    records_.erase(it);
-    order_.erase(std::remove(order_.begin(), order_.end(), testId), order_.end());
-    cancelFlags_.erase(testId);
+    {
+        std::lock_guard<std::mutex> lock(recordsMutex_);
+        auto it = records_.find(testId);
+        if (it == records_.end() || !isTerminalState(it->second.status.state)) return false;
+        records_.erase(it);
+        order_.erase(std::remove(order_.begin(), order_.end(), testId), order_.end());
+        cancelFlags_.erase(testId);
+    }
+    store_.remove(testId);
     return true;
 }
 
 size_t ExecutionEngine::clearHistory() {
-    std::lock_guard<std::mutex> lock(recordsMutex_);
-    size_t removed = 0;
-    for (auto it = order_.begin(); it != order_.end();) {
-        auto rit = records_.find(*it);
-        if (rit != records_.end() && isTerminalState(rit->second.status.state)) {
-            records_.erase(rit);
-            cancelFlags_.erase(*it);
-            it = order_.erase(it);
-            ++removed;
-        } else {
-            ++it;
+    std::vector<std::string> removedIds;
+    {
+        std::lock_guard<std::mutex> lock(recordsMutex_);
+        for (auto it = order_.begin(); it != order_.end();) {
+            auto rit = records_.find(*it);
+            if (rit != records_.end() && isTerminalState(rit->second.status.state)) {
+                records_.erase(rit);
+                cancelFlags_.erase(*it);
+                removedIds.push_back(*it);
+                it = order_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
-    return removed;
+    for (const auto& id : removedIds) store_.remove(id);
+    return removedIds.size();
 }
 
 void ExecutionEngine::trimHistory() {
-    std::lock_guard<std::mutex> lock(recordsMutex_);
-    while (order_.size() > config_.historyLimit) {
-        // 移除最早的终态记录
-        bool removed = false;
-        for (auto it = order_.begin(); it != order_.end(); ++it) {
-            auto rit = records_.find(*it);
-            if (rit == records_.end()) { order_.erase(it); removed = true; break; }
-            if (isTerminalState(rit->second.status.state)) {
-                records_.erase(rit);
-                cancelFlags_.erase(*it);
-                order_.erase(it);
-                removed = true;
-                break;
+    std::vector<std::string> removedIds;
+    {
+        std::lock_guard<std::mutex> lock(recordsMutex_);
+        while (order_.size() > config_.historyLimit) {
+            // 移除最早的终态记录
+            bool removed = false;
+            for (auto it = order_.begin(); it != order_.end(); ++it) {
+                auto rit = records_.find(*it);
+                if (rit == records_.end()) { order_.erase(it); removed = true; break; }
+                if (isTerminalState(rit->second.status.state)) {
+                    removedIds.push_back(*it);
+                    records_.erase(rit);
+                    cancelFlags_.erase(*it);
+                    order_.erase(it);
+                    removed = true;
+                    break;
+                }
             }
+            if (!removed) break;
         }
-        if (!removed) break;
     }
+    for (const auto& id : removedIds) store_.remove(id);
 }
 
 EngineStats ExecutionEngine::stats() const {
@@ -598,9 +664,13 @@ void ExecutionEngine::execute(const TestTask& task) {
     } else {
         ctx.result.finalState = aggregateState(failedSpecs - erroredSpecs, erroredSpecs,
                                                0, ctx.status.totalSpecs, false);
-        if (ctx.result.finalState == TestState::PASSED && ctx.status.totalScenarios > 0 &&
+        if (ctx.result.finalState == TestState::PASSED &&
             ctx.status.passedScenarios == 0 && ctx.status.failedScenarios == 0) {
+            // 没有任何场景真正执行：不能算通过，避免 CI 把“什么都没跑”当成成功
             ctx.result.finalState = TestState::SKIPPED;
+            if (ctx.status.totalScenarios == 0) {
+                ctx.result.warnings.push_back("No scenarios matched the requested specs/tags/scenario filters");
+            }
         }
     }
 
@@ -611,6 +681,7 @@ void ExecutionEngine::execute(const TestTask& task) {
     ctx.status.currentScenario.clear();
     ctx.status.currentStep.clear();
     ctx.status.errors = ctx.result.errors;
+    ctx.status.warnings = ctx.result.warnings;
 
     {
         std::lock_guard<std::mutex> lock(recordsMutex_);
@@ -637,6 +708,7 @@ void ExecutionEngine::execute(const TestTask& task) {
         stats_.skippedScenarios += ctx.result.skippedScenarios;
         stats_.totalDuration += ctx.result.totalDuration;
     }
+    persist(ctx.testId);
 
     publish(EventType::TEST_COMPLETED, ctx.testId, {
         {"state", testStateToString(ctx.result.finalState)},

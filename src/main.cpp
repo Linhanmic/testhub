@@ -49,6 +49,8 @@ void printUsage(const char* program) {
         << "  -c, --config <file>        JSON 配置文件\n"
         << "  -j, --concurrency <n>      并发执行的测试数（默认 1）\n"
         << "      --timeout <ms>         测试默认超时（毫秒）\n"
+        << "      --results-dir <path>   结果持久化目录（默认 data/results）\n"
+        << "      --no-persist           不持久化结果，仅保存在内存\n"
         << "      --log-level <level>    debug | info | warn | error | off\n"
         << "      --log-file <file>      日志文件\n"
         << "      --no-ui                不提供 Web UI\n"
@@ -70,7 +72,7 @@ bool needsValue(const std::string& opt) {
     static const char* withValue[] = {
         "-p", "--port", "-H", "--host", "-l", "--language", "-r", "--runner-cmd", "-d", "--dir",
         "-s", "--specs", "--concepts", "-c", "--config", "-j", "--concurrency", "--timeout",
-        "--log-level", "--log-file", "--web-dir", "--pid-file"};
+        "--results-dir", "--log-level", "--log-file", "--web-dir", "--pid-file"};
     for (const char* w : withValue) {
         if (opt == w) return true;
     }
@@ -155,6 +157,10 @@ int main(int argc, char* argv[]) {
             config.maxConcurrentTests = parseIntOrExit(opt, value);
         } else if (opt == "--timeout") {
             config.defaultTimeout = parseIntOrExit(opt, value);
+        } else if (opt == "--results-dir") {
+            config.resultsDir = value;
+        } else if (opt == "--no-persist") {
+            config.resultsDir.clear();
         } else if (opt == "--log-level") {
             config.logLevel = value;
         } else if (opt == "--log-file") {

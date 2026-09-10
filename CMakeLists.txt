@@ -63,6 +63,7 @@ add_custom_command(
 set(TESTHUB_CORE_SOURCES
     src/testhub.cpp
     src/engine/execution_engine.cpp
+    src/engine/result_store.cpp
     src/event/event_bus.cpp
     src/runner/mock_runner.cpp
     src/runner/process_runner.cpp
