@@ -70,8 +70,22 @@ inline std::string show(bool v) { return v ? "true" : "false"; }
 inline std::string show(const std::string& v) { return "\"" + v + "\""; }
 inline std::string show(const char* v) { return "\"" + std::string(v) + "\""; }
 
+// 用法: <binary> [--filter <substr> | <substr>] [--list]
 inline int runAll(int argc, char** argv) {
-    std::string filter = argc > 1 ? argv[1] : "";
+    std::string filter;
+    bool listOnly = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--list") listOnly = true;
+        else if (arg == "--filter" && i + 1 < argc) filter = argv[++i];
+        else if (!arg.empty() && arg[0] != '-') filter = arg;
+    }
+    if (listOnly) {
+        for (auto& t : registry()) {
+            if (filter.empty() || t.name.find(filter) != std::string::npos) std::cout << t.name << "\n";
+        }
+        return 0;
+    }
     int passed = 0, failed = 0, skipped = 0;
     auto suiteStart = std::chrono::steady_clock::now();
     for (auto& t : registry()) {

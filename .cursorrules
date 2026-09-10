@@ -12,30 +12,26 @@
 
 ## 项目信息
 
-- **项目路径**: `C:\Users\13657\Desktop\uHIL\gauge\testhub`
-- **编译命令**: `cd build && mingw32-make -j4`
-- **运行命令**: `./testhub.exe --port 9090 --language java`
-- **C++ 标准**: C++17
-- **构建系统**: CMake + MinGW
+- **配置**: `cmake -S . -B build -DCMAKE_CXX_COMPILER=g++`（默认 `c++` 不可用时指定编译器）
+- **编译**: `cmake --build build -j`
+- **测试**: `ctest --test-dir build --output-on-failure`（单元 + 集成 + Python 协议）
+- **运行**: `./build/testhub --port 8080 --language python --dir runners/python`（或省略 `--language` 使用 mock Runner）
+- **前端**: 原生 JS，`--web-dir web` 热改；提交前 `node --check web/app.js`，重新编译以内嵌
+- **C++ 标准**: C++17，零第三方依赖，`-Wall -Wextra -Wpedantic` 零警告（CI 开 `-Werror`）
+- **平台**: Linux / macOS / Windows（POSIX 与 Win32 分支均需保持可编译）
 
 ## 当前状态
 
-### 已完成
-- [x] HTTP API 服务器
-- [x] 测试队列
-- [x] Runner 桥接框架
-- [x] 事件系统
-- [x] 规范解析器（复用 Gauge）
+已完成能力、路线图与迭代记录统一维护在 `TODO.md`；架构与协议见 `DESIGN.md`。开始任何任务前先阅读这两份文件，并在完成后更新它们。
 
-### 待完成（按优先级）
-1. [ ] 修复 HTTP 请求解析问题
-2. [ ] 完善测试执行引擎
-3. [ ] 添加 WebSocket 支持
-4. [ ] 实现 Web UI
-5. [ ] 添加数据库支持
-6. [ ] 实现用户认证
-7. [ ] 性能优化
-8. [ ] 文档完善
+### 待完成（按优先级，详见 TODO.md）
+1. [ ] 结果持久化（JSON / SQLite）
+2. [ ] 报表导出（JUnit XML / HTML）
+3. [ ] `callback_url` 回调通知
+4. [ ] Bearer Token 鉴权
+5. [ ] Runner 池（真正并行）
+6. [ ] Node.js 参考 Runner
+7. [ ] 规范目录监控自动 reload
 
 ## 代码规范
 
@@ -65,14 +61,14 @@ private:
 
 每个迭代周期：
 
-1. **选择任务** - 从待完成列表中选择下一个任务
-2. **分析需求** - 理解任务的具体要求
-3. **设计实现** - 规划实现方案
+1. **选择任务** - 从 TODO.md 的 P1 列表中选择下一个任务
+2. **分析需求** - 理解任务的具体要求，阅读相关模块
+3. **设计实现** - 规划实现方案（新增 API 需同步 README 端点表与 DESIGN.md）
 4. **编写代码** - 实现功能
-5. **编写测试** - 确保代码质量
-6. **调试修复** - 解决发现的问题
-7. **代码审查** - 检查代码质量
-8. **更新文档** - 记录变更
+5. **编写测试** - 单元测试放 `tests/test_<module>.cpp`，端到端行为放 `tests/test_integration.cpp`
+6. **构建与验证** - `cmake --build build && ctest --test-dir build`；涉及 UI 时用浏览器实测
+7. **提交** - 按逻辑拆分提交，`git push`
+8. **更新文档** - 在 TODO.md 记录迭代、勾选任务、补充决策
 
 ## 质量标准
 
