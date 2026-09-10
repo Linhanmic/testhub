@@ -27,6 +27,11 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Configure
         run: >
           cmake -S . -B build
@@ -59,3 +64,6 @@ jobs:
 
       - name: Python runner protocol (standalone)
         run: python3 runners/python/test_runner_protocol.py
+
+      - name: Node runner protocol (standalone)
+        run: node runners/node/test_runner_protocol.js

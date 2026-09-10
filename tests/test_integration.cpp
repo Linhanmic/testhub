@@ -925,3 +925,76 @@ TEST_CASE("integration: python runner pool runs concurrent tests in separate pro
     CHECK(restart.json()["runners"][0]["pid"].asInt() != oldPid0);
     CHECK_EQ(restart.json()["restart_count"].asInt(), 3);
 }
+
+TEST_CASE("integration: node runner executes the bundled specs end to end") {
+    if (std::system("node -e 0 >/dev/null 2>&1") != 0) {
+        std::cout << "    (node not available; skipping)\n";
+        return;
+    }
+    std::string runnerDir = std::string(TESTHUB_SOURCE_DIR) + "/runners/node";
+    Server s("", [&](TestHubConfig& cfg) {
+        cfg.runnerLanguage = "node";
+        cfg.runnerCommand = "node " + runnerDir + "/testhub_runner.js";
+        cfg.projectPath = runnerDir;
+        cfg.maxConcurrentTests = 1;
+    });
+    Json runner = request(s.port, "GET", "/api/v1/runner/status").json();
+    REQUIRE_EQ(runner["state"].asString(), std::string("connected"));
+    CHECK_EQ(runner["language"].asString(), std::string("node"));
+    CHECK_EQ(runner["version"].asString().rfind("node-", 0), static_cast<size_t>(0));
+    CHECK(runner["pid"].asInt() > 0);
+    CHECK(runner["step_count"].asInt() >= 18);
+
+    // 与 Python Runner 使用完全相同的规范（含概念 auth.cpt、内联表格、数据表驱动）
+    HttpResult submit = request(s.port, "POST", "/api/v1/tests",
+                                R"({"spec_files":["login.spec","calculator.spec","checkout.spec"],"name":"node"})");
+    REQUIRE_EQ(submit.status, 202);
+    Json st = s.waitForTerminal(submit.json()["test_id"].asString(), 20000);
+    REQUIRE(!st.isNull());
+    CHECK_EQ(st["state"].asString(), std::string("passed"));
+    CHECK_EQ(st["total_scenarios"].asInt(), 12);
+    CHECK_EQ(st["passed_scenarios"].asInt(), 12);
+
+    Json result = request(s.port, "GET", "/api/v1/tests/" + st["test_id"].asString() + "/result").json();
+    REQUIRE_EQ(result["specs"].size(), static_cast<size_t>(3));
+    // after_scenario 钩子写入的消息随场景最后一步（teardown）/结果返回；DataTable 步骤消息可见
+    const Json& checkout = result["specs"][2];
+    CHECK_EQ(checkout["file"].asString(), std::string("checkout.spec"));
+    const Json& multi = checkout["scenarios"][1];
+    CHECK_EQ(multi["name"].asString(), std::string("购买多个商品"));
+    bool sawTableMessage = false;
+    for (const auto& step : multi["steps"].asArray()) {
+        if (step["parameterized_text"].asString() == "批量加入以下商品 {}") {
+            sawTableMessage = step["messages"].isArray() && step["messages"].size() == 1 &&
+                              step["messages"][0].asString() == "added 2 line(s)";
+        }
+    }
+    CHECK(sawTableMessage);
+
+    // 断言失败 -> failed，且 Node 的 AssertionError 信息/堆栈被带回
+    FileUtil::writeFile(s.specsDir + "/node_fail.spec",
+                        "# Node 失败\n\n## 错误的结果\n* 输入第一个数 \"1\"\n* 输入第二个数 \"2\"\n* 点击加号\n* 结果应该是 \"4\"\n\n## 未实现的步骤\n* 这个步骤没有实现\n");
+    submit = request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["node_fail.spec"],"name":"node-fail"})");
+    REQUIRE_EQ(submit.status, 202);
+    st = s.waitForTerminal(submit.json()["test_id"].asString(), 20000);
+    CHECK_EQ(st["state"].asString(), std::string("failed"));
+    CHECK_EQ(st["failed_scenarios"].asInt(), 2);
+    result = request(s.port, "GET", "/api/v1/tests/" + st["test_id"].asString() + "/result").json();
+    const Json& wrong = result["specs"][0]["scenarios"][0];
+    CHECK_EQ(wrong["state"].asString(), std::string("failed"));
+    const Json& lastStep = wrong["steps"][3];
+    CHECK_EQ(lastStep["state"].asString(), std::string("failed"));
+    CHECK(lastStep["error"].asString().find("expected 4, got 3") != std::string::npos);
+    CHECK(lastStep["stack_trace"].asString().find("AssertionError") != std::string::npos);
+    const Json& missing = result["specs"][0]["scenarios"][1]["steps"][0];
+    CHECK(missing["state"].asString() == "error" || missing["state"].asString() == "failed");
+    CHECK(missing["error"].asString().find("No implementation") != std::string::npos);
+
+    // 通过 HTTP 重启 Runner：新进程、同样的步骤数
+    int oldPid = runner["pid"].asInt();
+    HttpResult restart = request(s.port, "POST", "/api/v1/runner/restart", "{}");
+    CHECK_EQ(restart.status, 200);
+    CHECK(restart.json()["restarted"].asBool());
+    CHECK(restart.json()["pid"].asInt() != oldPid);
+    CHECK_EQ(restart.json()["step_count"].asInt(), runner["step_count"].asInt());
+}

@@ -138,7 +138,11 @@ std::string RunnerBridge::defaultCommandForLanguage(const std::string& language)
         if (!script.empty()) return "python3 " + quoteShell(script);
         return "python3 -m testhub_runner";
     }
-    if (language == "node" || language == "js" || language == "javascript") return "node testhub-runner.js";
+    if (language == "node" || language == "js" || language == "javascript" || language == "nodejs") {
+        std::string script = locateBundledRunner("runners/node/testhub_runner.js");
+        if (!script.empty()) return "node " + quoteShell(script);
+        return "node testhub_runner.js";
+    }
     if (language == "mock" || language == "none" || language.empty()) return "";
     return "testhub-runner-" + language;
 }

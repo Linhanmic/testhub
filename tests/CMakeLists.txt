@@ -35,3 +35,11 @@ if(PYTHON3_EXECUTABLE)
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/runners/python")
     set_tests_properties(python_runner_protocol PROPERTIES TIMEOUT 60)
 endif()
+
+find_program(NODE_EXECUTABLE NAMES node nodejs)
+if(NODE_EXECUTABLE)
+    add_test(NAME node_runner_protocol
+        COMMAND "${NODE_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/runners/node/test_runner_protocol.js"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/runners/node")
+    set_tests_properties(node_runner_protocol PROPERTIES TIMEOUT 60)
+endif()
