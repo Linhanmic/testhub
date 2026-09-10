@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: ["master", "main", "cursor/**"]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} / ${{ matrix.compiler }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            compiler: g++
+          - os: ubuntu-latest
+            compiler: clang++
+          - os: macos-latest
+            compiler: clang++
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+          -DTESTHUB_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 180
+
+      - name: Smoke test binary
+        run: |
+          ./build/testhub --version
+          ./build/testhub --print-config > /dev/null
+          ./build/testhub --port 18099 --log-level warn &
+          PID=$!
+          for i in $(seq 1 50); do
+            if curl -sf http://127.0.0.1:18099/api/v1/health > /dev/null; then break; fi
+            sleep 0.2
+          done
+          curl -sf http://127.0.0.1:18099/api/v1/health
+          curl -sf -X POST http://127.0.0.1:18099/api/v1/tests -H 'Content-Type: application/json' -d '{"spec_files":["login.spec"]}'
+          sleep 1
+          curl -sf "http://127.0.0.1:18099/api/v1/tests?state=passed" | grep -q '"count":1'
+          kill $PID
+          wait $PID || true
+
+      - name: Python runner protocol (standalone)
+        run: python3 runners/python/test_runner_protocol.py
