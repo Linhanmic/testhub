@@ -130,3 +130,15 @@ def checkout(method):
 def order_status(status):
     actual = data_store.scenario["order"]
     assert actual == status, f"expected order status {status!r}, got {actual!r}"
+
+
+# ---------------- 通用 ----------------
+
+@step("等待 <seconds> 秒")
+def wait_seconds(seconds):
+    """用于演示实时监控、超时与取消；真实项目中通常不需要显式等待。"""
+    import time
+
+    delay = float(seconds)
+    Messages.write(f"sleeping {delay:g}s")
+    time.sleep(delay)
