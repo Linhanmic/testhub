@@ -5,7 +5,7 @@
 ## 当前状态（v1.1.0）
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
-- 82 个自动化测试全部通过（63 单元 + 12 集成 + 7 Python 协议），GitHub Actions 三平台 CI
+- 83 个自动化测试全部通过（63 单元 + 13 集成 + 7 Python 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
 - 约 12k 行（含前端、Python Runner、测试）
 
 ## 路线图
@@ -131,6 +131,15 @@
 - 测试：AuthPolicy 单测（读写/路径/凭据来源/常量时间）、过滤器单测；集成测试覆盖两种模式下的 REST、预检、配置掩码、WS 拒绝/放行
 - 浏览器实测：无 token → 弹窗 → 输入后页面与实时连接恢复；错误 token → "token 无效"提示
 
+### 迭代 12 — 并发稳定性（CI 偶发崩溃排查）
+
+- 起因：迭代 11 推送后 ubuntu/clang CI 的集成测试偶发 `terminate called without an active exception`；本地 60 次未复现，改用 ThreadSanitizer 定位
+- 根因：`WebSocketServer::handleUpgrade` 先注册连接再给 `conn->reader` 赋值，客户端秒断时读线程已进入 `closeConnection` 且看到句柄"不可 join"，于是没有把自己交给 finished 列表；joinable 的 `std::thread` 随 `Connection` 析构触发 `std::terminate`。修复：句柄赋值与检查同锁（`readerMutex`），已结束的读线程在下次升级时回收而非只在 `stop()`
+- 日志错位：`[ PASS ]` 写入全缓冲的 stdout、日志写入 stderr，异常终止吞掉了已通过的结果行，导致 CI 日志把崩溃"归咎"到 callback 测试；测试框架现在每条结果立即 flush
+- 顺带修复两处丢失唤醒：`HttpServer::stop()` 与 `CallbackNotifier::stop()` 在无锁状态下改标志并 notify，等待方可能卡在 `join()`
+- 顺带修复引擎竞态：终态先写入 `records_` 再落盘，轮询到终态的客户端可能读不到结果文件（本地循环 40 次复现 1 次）；现在先序列化副本再发布终态，取消路径同样处理
+- 测试：新增 40 次 WS 秒连秒断的回归测试；WS 过滤测试改为等待 `subscribed` 确认后再提交；gcc/clang 各循环 60 次、TSan 全量运行零告警
+
 ---
 
 ## 决策记录
@@ -155,7 +164,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 82 个，全部通过；`ctest` 约 2 s |
+| 自动化测试 | 83 个，全部通过；`ctest` 约 2 s；TSan 零告警 |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
 | 代码规模 | 约 14k 行（C++ 约 10.2k，前端约 1.2k，Python 约 0.7k，测试约 2.4k） |
