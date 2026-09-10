@@ -316,6 +316,22 @@ TEST_CASE("integration: submit test, follow status and fetch result") {
     CHECK_EQ(events.status, 200);
     CHECK(events.json()["events"].size() > 5);
 
+    HttpResult junit = request(s.port, "GET", "/api/v1/tests/" + id + "/report?format=junit&download=1");
+    CHECK_EQ(junit.status, 200);
+    CHECK_EQ(junit.headers["content-type"], std::string("application/xml; charset=utf-8"));
+    CHECK_EQ(junit.headers["content-disposition"], "attachment; filename=\"" + id + ".xml\"");
+    CHECK(junit.body.find("<testsuites name=\"it\" tests=\"9\" failures=\"0\" errors=\"0\" skipped=\"0\"") != std::string::npos);
+    CHECK(junit.body.find("<testsuite id=\"0\" name=\"用户登录\" file=\"login.spec\" tests=\"3\"") != std::string::npos);
+    CHECK(junit.body.find("<testcase name=\"两数相加 [row 1]\" classname=\"calculator\"") != std::string::npos);
+    HttpResult html = request(s.port, "GET", "/api/v1/tests/" + id + "/report?format=html");
+    CHECK_EQ(html.status, 200);
+    CHECK_EQ(html.headers["content-type"], std::string("text/html; charset=utf-8"));
+    CHECK(html.headers.count("content-disposition") == 0);
+    CHECK(html.body.find("<!DOCTYPE html>") == 0);
+    CHECK(html.body.find("<span class=\"pill passed\">通过</span>") != std::string::npos);
+    CHECK_EQ(request(s.port, "GET", "/api/v1/tests/" + id + "/report?format=pdf").status, 400);
+    CHECK_EQ(request(s.port, "GET", "/api/v1/tests/nope/report").status, 404);
+
     HttpResult rerun = request(s.port, "POST", "/api/v1/tests/" + id + "/rerun", "{}");
     CHECK_EQ(rerun.status, 202);
     std::string rerunId = rerun.json()["test_id"].asString();
@@ -482,11 +498,18 @@ TEST_CASE("integration: cancel a running test via API") {
     REQUIRE_EQ(submit.status, 202);
     std::string id = submit.json()["test_id"].asString();
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK_EQ(request(s.port, "GET", "/api/v1/tests/" + id + "/report").status, 409);
     HttpResult cancel = request(s.port, "POST", "/api/v1/tests/" + id + "/cancel", "{}");
     CHECK_EQ(cancel.status, 200);
     Json st = s.waitForTerminal(id);
     CHECK_EQ(st["state"].asString(), std::string("cancelled"));
     CHECK(st["executed_scenarios"].asInt() < 30);
+
+    // 取消后的报表：未执行的场景记为 skipped
+    HttpResult report = request(s.port, "GET", "/api/v1/tests/" + id + "/report?format=xml");
+    CHECK_EQ(report.status, 200);
+    CHECK(report.body.find("<skipped message=\"Skipped because the test was cancelled\"/>") != std::string::npos);
+    CHECK(report.body.find("tests=\"30\"") != std::string::npos);
 
     Json queue = request(s.port, "GET", "/api/v1/queue").json();
     CHECK_EQ(queue["size"].asInt(), 0);
