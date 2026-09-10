@@ -5,7 +5,7 @@
 ## 当前状态（v1.1.0）
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
-- 73 个自动化测试全部通过（58 单元 + 8 集成 + 7 Python 协议），GitHub Actions 三平台 CI
+- 78 个自动化测试全部通过（61 单元 + 10 集成 + 7 Python 协议），GitHub Actions 三平台 CI
 - 约 12k 行（含前端、Python Runner、测试）
 
 ## 路线图
@@ -25,10 +25,10 @@
 - [x] 文档同步（README / DESIGN / QUICKSTART / TODO）
 - [x] 结果持久化：终态记录 JSON 落盘（`data/results/`），启动回放历史与统计，随 history_limit 裁剪
 - [x] 报表导出：`GET /tests/{id}/report?format=junit|html`，UI 详情页一键下载
+- [x] 回调通知：`callback_url` 完成后 POST 摘要，指数退避重试，`callback.*` 事件与状态计数
 
 ### P1 — 下一步（按优先级）
 
-- [ ] **回调通知**：实现 `callback_url`（测试完成后 POST 结果摘要，带重试）
 - [ ] **鉴权**：`server.auth_token`，Bearer Token 校验写操作；UI 支持输入 token
 - [ ] **Runner 池**：`max_concurrent_tests > 1` 时启动多个 Runner 进程真正并行（当前为场景级串行）
 - [ ] **Node.js 参考 Runner**：复用 JSON-lines 协议，验证语言无关性
@@ -113,6 +113,15 @@
 - UI：详情页新增"HTML 报告"（新标签页打开）与"JUnit XML"（下载）按钮
 - 测试：5 个 ReportWriter 单测（结构、转义、控制字符剔除、空结果、HTML 自包含）；集成测试覆盖两种格式、Content-Disposition、409/400/404；`xmllint` 校验输出
 
+### 迭代 10 — 完成回调
+
+- 新增零依赖 `HttpClient`（`util/http_client.*`）：URL 解析、非阻塞 connect + 超时、Content-Length / chunked / 读到关闭三种正文，仅 `http://`
+- 新增 `CallbackNotifier`（`notify/callback_notifier.*`）：订阅 `test.completed` / 排队阶段的 `test.cancelled`，投递线程按到期时间取任务；2xx 成功，网络错误/5xx/429 指数退避重试至 `max_attempts`；发布 `callback.delivered` / `callback.failed`；`GET /status` 暴露 `callbacks{pending,delivered,failed,attempts}`
+- 载荷含请求元数据、场景计数、`failed_scenarios_detail`、`links`（`public_base_url` 前缀）；头部 `X-TestHub-Event/Test-Id/Attempt`
+- 配置 `callbacks.*`；CLI `--public-url` / `--no-callbacks`；提交时校验 `callback_url`（非 http 返回 400）
+- UI：提交表单新增回调 URL、详情页显示回调地址、总览"回调"计数、事件流着色并显示 `url/status/attempts`
+- 测试：HttpClient 单测（解析、真实服务器 POST、404/204、超时、拒绝连接、https 拒绝）、载荷单测；集成测试用第二个 `HttpServer` 作接收端验证 503 → 重试成功与拒绝连接 → 3 次后放弃
+
 ---
 
 ## 决策记录
@@ -127,6 +136,7 @@
 | 迭代 7 | 运行中视图由事件流在前端构建，而非服务端提供部分结果 | 复用既有事件，无需新增 API；结果落地后以服务端结果树为准 |
 | 迭代 8 | 持久化采用“一测试一 JSON 文件”而非 SQLite | 零依赖、可直接用文本工具查看/备份、与 API 输出同构；查询需求复杂时再引入数据库 |
 | 迭代 9 | 报表按需渲染而非随结果落盘 | 结果 JSON 已是事实来源，报表只是视图；避免多份文件不一致，格式演进无需迁移 |
+| 迭代 10 | 回调客户端自研且仅支持 http:// | 保持零依赖；HTTPS 需要 TLS 库，交给反向代理/内网中转更符合守护进程的部署形态 |
 
 ---
 
@@ -135,7 +145,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 73 个，全部通过；`ctest` 约 1.4 s |
+| 自动化测试 | 78 个，全部通过；`ctest` 约 2 s |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
-| 代码规模 | 约 12.5k 行（C++ 约 9.3k，前端约 1.1k，Python 约 0.7k，测试约 1.9k） |
+| 代码规模 | 约 13.5k 行（C++ 约 10k，前端约 1.1k，Python 约 0.7k，测试约 2.2k） |

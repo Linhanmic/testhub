@@ -15,11 +15,12 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 | 执行引擎 | 优先级队列、标签过滤表达式（`smoke & !slow`）、场景名过滤、fail_fast、测试/步骤超时、取消、`failed_only` 重跑、结果历史 |
 | 持久化 | 已完成的测试以 JSON 落盘（默认 `data/results/`），重启后自动回放历史与统计 |
 | 报表 | 按需导出 JUnit XML（供 Jenkins / GitLab / GitHub Actions 收集）与自包含 HTML 报告；UI 一键下载 |
+| 回调 | 请求携带 `callback_url`，测试结束后 POST JSON 摘要（含失败场景清单与报表链接），失败按指数退避重试 |
 | Runner | 跨平台子进程桥接 + JSON-lines 协议；内置 mock Runner；Python 参考 Runner（装饰器式步骤实现、钩子、数据表、消息）；自动重启；并发测试时场景级独占会话 |
 | 服务端 | 多线程 HTTP/1.1（keep-alive、流水线、Content-Length、超时、`{param}` 路由、CORS、HEAD/OPTIONS、ETag 静态资源、SPA 回退） |
 | 实时性 | 异步事件总线；`/ws/v1/events` WebSocket 推送（按类型/测试 ID 订阅、历史回放） |
 | Web UI | 内嵌单页应用：总览、提交测试、测试记录、结果树、运行中实时执行树、规范浏览/编辑/校验、Runner 状态、事件流、暗色模式 |
-| 质量 | 58 个单元测试 + 8 个 HTTP/WS 集成测试 + 7 个 Python 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`） |
+| 质量 | 61 个单元测试 + 10 个 HTTP/WS 集成测试 + 7 个 Python 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`） |
 
 ## 快速开始
 
@@ -64,6 +65,8 @@ curl -o report.html "http://localhost:8080/api/v1/tests/test-20260910-142940-001
 ```
 
 `spec_files` 为空数组时表示运行规范目录下的全部规范。JUnit XML 可直接交给 Jenkins、GitLab CI（`artifacts:reports:junit`）或 GitHub Actions 的测试报告插件。
+
+请求体其他可选字段：`name`、`scenarios`（场景名过滤）、`priority`（low/normal/high/urgent）、`environment`、`timeout_ms`、`fail_fast`、`metadata`（字符串键值，会原样带入报表与回调）、`callback_url`（测试结束后 POST JSON 摘要到该 `http://` 地址，失败按指数退避重试；载荷含 `state`、场景计数、`failed_scenarios_detail` 与 `links.report_junit` 等链接）。
 
 ## 编写规范与步骤实现
 
@@ -147,6 +150,8 @@ WebSocket 连接后发送 `{"action":"subscribe","events":["test.*","scenario.*"
     --timeout <ms>         测试默认超时
     --results-dir <path>   结果持久化目录（默认 data/results）
     --no-persist           不持久化结果，仅保存在内存
+    --public-url <url>     回调载荷中链接的公开地址前缀
+    --no-callbacks         禁用 callback_url 完成回调
     --log-level <level>    debug | info | warn | error | off
     --log-file <file>      日志文件
     --no-ui                不提供 Web UI

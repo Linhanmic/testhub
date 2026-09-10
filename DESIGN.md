@@ -42,7 +42,8 @@ TestHub 复用 Gauge 的规范语法（`.spec` / `.cpt`），便于迁移已有�
                  │    ├─ SpecRepository ── SpecParser / ConceptDictionary          │
                  │    ├─ records_ (状态 + 结果历史，环形上限)                        │
                  │    └─ ResultStore (data/results/<id>.json，启动时回放)             │
-                 │                                                                │
+                 │  CallbackNotifier ◄──subscribe(test.completed)── EventBus        │
+                 │    └─ HttpClient ── POST callback_url（指数退避重试）──► 外部系统   │
                  │  RunnerBridge (会话锁、心跳、自动重启、步骤缓存)                    │
                  │    ├─ MockRunner  (进程内，所有步骤通过，可配置延迟)               │
                  │    └─ ProcessRunner (POSIX fork/exec 或 Windows CreateProcess)   │
@@ -163,6 +164,14 @@ class Runner {                      // 抽象接口
 
 单例；`publish()` 入队后由派发线程调用订阅者；订阅支持精确类型、`prefix.*` 通配与 `*`；保留最近 N 条历史供 `GET /events` 与 WebSocket 连接时回放。
 
+### 3.6a CallbackNotifier（`src/notify/callback_notifier.*`，`src/util/http_client.*`）
+
+- 订阅 `test.completed` 与 `test.cancelled`（仅 `stage=queued`，运行中取消最终仍会产生 `test.completed`）；请求带 `callback_url` 时把任务放入投递队列。
+- 单独的投递线程用零依赖 `HttpClient`（仅 `http://`，阻塞式，连接/读写超时）POST JSON 载荷；头部 `X-TestHub-Event` / `X-TestHub-Test-Id` / `X-TestHub-Attempt`。
+- 2xx 视为成功；网络错误、5xx、429 按 `retry_backoff_ms × 2^(n-1)` 退避重试至 `max_attempts`，其余状态码不重试。结果以 `callback.delivered` / `callback.failed` 事件发布，并计入 `GET /status` 的 `callbacks`。
+- 载荷：`event`、`test_id`、`name`、`state`、场景计数、时间、`duration`、`errors`/`warnings`、`failed_scenarios_detail[]`（规范/场景/数据行/错误）、`links{status,result,report_junit,report_html,ui}`（前缀为 `callbacks.public_base_url`）、`attempt`、`sent_at`。
+- 提交时 `callback_url` 非法（非 `http://`）直接返回 400。
+
 ### 3.7 WebSocketServer（`src/server/websocket_server.*`）
 
 - RFC 6455 握手（`Sec-WebSocket-Accept` = Base64(SHA-1)），文本/二进制/ping/pong/close 帧，分片与掩码处理。
@@ -202,7 +211,7 @@ struct TestRequest {
     int timeoutMs = 0;                    // 0 = 默认
     bool failFast = false;
     std::map<std::string, std::string> metadata;
-    std::string callbackUrl;              // 已接受，回调尚未实现（见 TODO）
+    std::string callbackUrl;              // 完成后 POST 摘要（见 3.6a）
 };
 
 struct StepResult     { stepText, parameterizedText, state, errorMessage, stackTrace, duration,
@@ -232,6 +241,7 @@ JSON 序列化位于 `src/model/json_convert.h`，字段名为 snake_case（`spe
 | `runner.connecting` / `runner.connected` / `runner.disconnected` / `runner.error` / `runner.log` | `language`, `pid`, `version`, `message`, `level` |
 | `queue.updated` | `queue_size`, `action`（enqueued/dequeued/cancelled） |
 | `specs.reloaded` | `concepts`（重新加载）或 `file`, `action`（created/updated/deleted） |
+| `callback.delivered` / `callback.failed` | `url`, `status`, `attempts`, `error` |
 
 `data` 的值全部为字符串，前端按需解析。
 
@@ -310,6 +320,7 @@ JSON 文件（`--config`），键与 `--print-config` 输出一致：
                 "connection_timeout":15000,"request_timeout":60000,"auto_restart":true,"max_restarts":5,"mock_delay_ms":0},
   "execution": {"max_concurrent_tests":1,"default_timeout":300000,"step_timeout":60000,"history_limit":200,
                 "results_dir":"data/results","environment":{"BASE_URL":"http://localhost:3000"}},
+  "callbacks": {"enabled":true,"timeout_ms":10000,"max_attempts":3,"retry_backoff_ms":1000,"public_base_url":""},
   "specs":     {"dir":"specs","concepts_dir":""},
   "logging":   {"level":"info","file":"","requests":true}
 }
@@ -325,12 +336,13 @@ src/
   testhub.{h,cpp}          TestHubConfig + TestHub 门面
   server/                  http_server, websocket_server, api_routes, web_ui, web_assets.h
   engine/                  execution_engine, result_store, test_queue, tag_filter
+  notify/                  callback_notifier（callback_url 投递与重试）
   report/                  report_writer（JUnit XML / HTML）
   runner/                  runner, mock_runner, process_runner, runner_bridge
   spec/                    spec, spec_parser, spec_repository
   event/                   event_bus
   model/                   types, json_convert
-  util/                    json, sha1, base64, logger, string_util, file_util, time_util
+  util/                    json, http_client, sha1, base64, logger, string_util, file_util, time_util
 web/                       index.html, app.js, app.css, favicon.svg
 runners/python/            testhub_runner.py, step_impl/, test_runner_protocol.py
 specs/                     示例规范与 concepts/
@@ -342,7 +354,7 @@ cmake/EmbedResources.cmake
 ## 8. 质量保障
 
 - **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）；报表（JUnit 结构与计数、转义、空结果、HTML 自包含）。
-- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放。
+- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）。
 - **协议测试**（`python_runner_protocol`）：以子进程启动 Python Runner，验证 ping/get_steps/execute_step/hook/kill 与错误路径。
 - **CI**：Ubuntu（g++、clang++）与 macOS，`-Wall -Wextra -Wpedantic -Werror`，`ctest`，二进制冒烟（curl）。
 
@@ -350,8 +362,7 @@ cmake/EmbedResources.cmake
 
 - 结果以单文件 JSON 持久化，适合中小规模历史；海量历史或跨实例查询需要 SQLite/数据库后端。
 - 同一时刻只有一个 Runner 进程；`max_concurrent_tests > 1` 时通过场景级会话锁串行化步骤执行，真正并行需要 Runner 池。
-- `callback_url` 已在请求模型中接受但尚未回调。
+- 回调仅支持 `http://`（无 TLS）；需要 HTTPS 时请经由本地反向代理或内网中转。
 - 无鉴权；建议在受信网络内部署或置于反向代理之后（计划：Bearer Token）。
-- 报表导出（JUnit XML / HTML）尚未实现。
 
 详细任务列表见 [TODO.md](TODO.md)。
