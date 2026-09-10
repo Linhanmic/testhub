@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>TestHub</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div id="app" class="app">
+    <aside class="sidebar">
+      <a class="brand" href="#/dashboard">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-text">TestHub</span>
+        <span class="brand-version" id="brand-version"></span>
+      </a>
+      <nav class="nav" id="nav">
+        <a href="#/dashboard" data-route="dashboard"><span class="nav-icon">◫</span>总览</a>
+        <a href="#/run" data-route="run"><span class="nav-icon">▶</span>提交测试</a>
+        <a href="#/tests" data-route="tests"><span class="nav-icon">☰</span>测试记录</a>
+        <a href="#/specs" data-route="specs"><span class="nav-icon">≡</span>规范文件</a>
+        <a href="#/runner" data-route="runner"><span class="nav-icon">⚙</span>Runner</a>
+        <a href="#/events" data-route="events"><span class="nav-icon">⚡</span>事件流</a>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="conn" id="conn-indicator">
+          <span class="conn-dot"></span>
+          <span class="conn-text">连接中…</span>
+        </div>
+        <a class="muted small" href="/api/v1/status" target="_blank" rel="noopener">API 状态</a>
+      </div>
+    </aside>
+    <main class="main" id="main" tabindex="-1">
+      <div class="loading">正在加载…</div>
+    </main>
+  </div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
