@@ -81,6 +81,7 @@ src/runner/process_runner.* POSIX/Windows 子进程 + JSON-lines
 src/runner/runner_bridge.*  会话锁、心跳、自动重启、步骤缓存
 src/spec/spec_parser.*     .spec/.cpt 解析器，ConceptDictionary
 src/spec/spec_repository.* 规范目录扫描、读取、写入、校验
+src/spec/spec_watcher.*    规范目录轮询监控（自动重载概念、推送 specs.reloaded）
 src/event/event_bus.*      单例异步事件总线，历史环形缓冲，通配订阅
 src/model/types.h          TestRequest/TestStatus/TestResult/StepResult/Event 等
 src/model/json_convert.h   模型 ↔ Json
@@ -133,7 +134,7 @@ http.get("/api/v1/hello/{name}", [this](const HttpRequest& req) {
 
 ### 添加规范示例
 
-把 `.spec` 放入 `specs/`，概念放入 `specs/concepts/`；服务运行中可调用 `POST /api/v1/specs/reload` 或在 UI 点击"重新加载"。
+把 `.spec` 放入 `specs/`，概念放入 `specs/concepts/`。服务默认每 2 秒轮询规范目录，用编辑器或 `git pull` 改动的文件会自动生效（概念自动重载，UI 规范页实时刷新并提示）；也可以调用 `POST /api/v1/specs/reload` 或在 UI 点击"重新加载"立即扫描。`--watch-interval <ms>` 调整频率，`--no-watch` 关闭。
 
 ## 6. 调试技巧
 

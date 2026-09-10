@@ -11,7 +11,7 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 | 领域 | 能力 |
 |------|------|
 | 运行模式 | 守护进程常驻；`--daemon`、PID 文件、JSON 配置文件、CLI 覆盖 |
-| 规范 | `# 规范` / `## 场景` / `* 步骤`、`tags:`、规范级数据表（数据驱动）、上下文步骤、`___` 清理步骤、概念（`.cpt`）展开、`"静态"` / `<动态>` / `<file:>` / `<table:>` 参数、内联表格 |
+| 规范 | `# 规范` / `## 场景` / `* 步骤`、`tags:`、规范级数据表（数据驱动）、上下文步骤、`___` 清理步骤、概念（`.cpt`）展开、`"静态"` / `<动态>` / `<file:>` / `<table:>` 参数、内联表格；目录监控：编辑器/git 改动自动生效并推送 `specs.reloaded` |
 | 执行引擎 | 优先级队列、标签过滤表达式（`smoke & !slow`）、场景名过滤、fail_fast、测试/步骤超时、取消、`failed_only` 重跑、结果历史 |
 | 持久化 | 已完成的测试以 JSON 落盘（默认 `data/results/`），重启后自动回放历史与统计 |
 | 报表 | 按需导出 JUnit XML（供 Jenkins / GitLab / GitHub Actions 收集）与自包含 HTML 报告；UI 一键下载 |
@@ -21,7 +21,7 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 | 服务端 | 多线程 HTTP/1.1（keep-alive、流水线、Content-Length、超时、`{param}` 路由、CORS、HEAD/OPTIONS、ETag 静态资源、SPA 回退） |
 | 实时性 | 异步事件总线；`/ws/v1/events` WebSocket 推送（按类型/测试 ID 订阅、历史回放） |
 | Web UI | 内嵌单页应用：总览、提交测试、测试记录、结果树、运行中实时执行树、规范浏览/编辑/校验、Runner 状态、事件流、暗色模式 |
-| 质量 | 63 个单元测试 + 13 个 HTTP/WS 集成测试 + 7 个 Python 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
+| 质量 | 67 个单元测试 + 14 个 HTTP/WS 集成测试 + 7 个 Python 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
 
 ## 快速开始
 
@@ -125,7 +125,7 @@ Runner 启动时会加载 `--dir` 下 `step_impl/` 中的全部 Python 文件。
 | GET | `/api/v1/queue` | 当前队列 |
 | GET | `/api/v1/specs` | 列出规范（含场景数、标签、无效文件） |
 | POST | `/api/v1/specs/validate` | 校验文件或内联内容 |
-| POST | `/api/v1/specs/reload` | 重新扫描规范目录 |
+| POST | `/api/v1/specs/reload` | 立即重新扫描规范目录（返回 `changes`；目录监控开启时通常无需手动调用） |
 | GET / PUT / DELETE | `/api/v1/specs/{path}` | 读取（`?raw=true`）/ 创建或更新 / 删除规范 |
 | GET | `/api/v1/concepts` | 列出概念 |
 | GET | `/api/v1/runner/status` | Runner 状态 |
@@ -146,6 +146,8 @@ WebSocket 连接后发送 `{"action":"subscribe","events":["test.*","scenario.*"
 -d, --dir <path>           测试项目目录（Runner 工作目录）
 -s, --specs <path>         规范目录（默认 specs）
     --concepts <path>      概念目录（默认与规范目录相同）
+    --watch-interval <ms>  规范目录轮询间隔（默认 2000，0 禁用）
+    --no-watch             不监控规范目录变化
 -c, --config <file>        JSON 配置文件
 -j, --concurrency <n>      并发执行的测试数（默认 1）
     --timeout <ms>         测试默认超时

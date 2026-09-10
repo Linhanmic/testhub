@@ -40,6 +40,7 @@ TestHub 复用 Gauge 的规范语法（`.spec` / `.cpt`），便于迁移已有�
                  │    ├─ TestQueue (优先级 + FIFO)                 │              │
                  │    ├─ worker 线程 ×N ── executeTest/Spec/Scenario/Step ─────────┤
                  │    ├─ SpecRepository ── SpecParser / ConceptDictionary          │
+                 │    │     └─ SpecWatcher (轮询目录，变更 → specs.reloaded) ────────┤
                  │    ├─ records_ (状态 + 结果历史，环形上限)                        │
                  │    └─ ResultStore (data/results/<id>.json，启动时回放)             │
                  │  CallbackNotifier ◄──subscribe(test.completed)── EventBus        │
@@ -63,6 +64,8 @@ TestHub 复用 Gauge 的规范语法（`.spec` / `.cpt`），便于迁移已有�
 | EventBus 派发线程 | 1 | 把事件异步投递给订阅者（WS 连接、引擎内部、日志），避免阻塞发布方 |
 | Runner 读线程 | 每个 ProcessRunner 1 | 读取子进程 stdout，按 `id` 匹配响应；`log` 消息转为 `runner.log` 事件 |
 | 心跳线程 | 1（RunnerBridge） | 周期 `ping`，超时/退出时按 `auto_restart` 重启 |
+| 回调投递线程 | 1（CallbackNotifier） | 按到期时间取任务 POST `callback_url`，失败指数退避重试 |
+| 规范监控线程 | 1（SpecWatcher，可禁用） | 每 `specs.watch_interval_ms` 扫描一次目录快照，变更时重载概念并发布 `specs.reloaded` |
 
 ## 3. 核心模块
 
@@ -146,6 +149,15 @@ worker 线程
 | `.cpt` 中 `# 概念 <p>` + 步骤 | 概念定义；规范中同文本步骤会展开为 `concept_steps` |
 
 解析结果携带行号；错误（无标题、场景在标题前等）与警告（无场景）分别收集，`SpecRepository::validate()` 与 `POST /specs/validate` 直接返回。`SpecRepository` 负责扫描目录（`.spec`/`.md`）、读写文件、缓存概念字典（默认 `specs/concepts/`，可配置）。
+
+### 3.4a SpecWatcher（`src/spec/spec_watcher.*`）
+
+- 轮询而非 inotify/FSEvents：零依赖、跨平台，规范目录通常只有几十到几百个文件，秒级轮询开销可忽略。
+- 快照为 `绝对路径 → {mtime, size}`，覆盖规范目录与（若在目录外的）概念目录中的 `.spec/.md/.cpt`；每轮 `diff` 得到 created/updated/deleted。
+- **稳定窗口**：修改时间距现在不足 `settle_ms`（200 ms）的文件视为仍在写入——已存在的沿用旧签名、新建的暂不纳入，下一轮再报告，避免解析到编辑器写了一半的内容。
+- 有 `.cpt` 变化时调用 `SpecRepository::reloadConcepts()`；随后发布一个 `specs.reloaded`（`source=watcher`，含计数与文件清单，最多列 20 个）。规范文件本身不缓存解析结果，无需失效。
+- API 的 PUT/DELETE 写完文件后调用 `acknowledge()` 重记快照，避免同一变更被报告两次；`POST /specs/reload` 则主动 `scan()` 并把变更集放进响应。
+- `GET /status` 的 `spec_watcher` 暴露 `enabled / interval_ms / tracked_files / scans / changes / reloads / last_change_at`；配置 `specs.watch`、`specs.watch_interval_ms`，CLI `--watch-interval` / `--no-watch`。
 
 ### 3.5 RunnerBridge / Runner（`src/runner/`）
 
@@ -248,7 +260,7 @@ JSON 序列化位于 `src/model/json_convert.h`，字段名为 snake_case（`spe
 | `step.started` / `step.completed` | `spec`, `scenario`, `step`, `parameterized_text`, `is_concept`, `state`, `duration`, `error` |
 | `runner.connecting` / `runner.connected` / `runner.disconnected` / `runner.error` / `runner.log` | `language`, `pid`, `version`, `message`, `level` |
 | `queue.updated` | `queue_size`, `action`（enqueued/dequeued/cancelled） |
-| `specs.reloaded` | `concepts`（重新加载）或 `file`, `action`（created/updated/deleted） |
+| `specs.reloaded` | `source`（manual / api / watcher）；api：`file`, `action`（created/updated/deleted）；watcher：`created`, `updated`, `deleted` 计数、`files`、`concepts`、`concepts_reloaded` |
 | `callback.delivered` / `callback.failed` | `url`, `status`, `attempts`, `error` |
 
 `data` 的值全部为字符串，前端按需解析。
@@ -330,7 +342,7 @@ JSON 文件（`--config`），键与 `--print-config` 输出一致：
   "execution": {"max_concurrent_tests":1,"default_timeout":300000,"step_timeout":60000,"history_limit":200,
                 "results_dir":"data/results","environment":{"BASE_URL":"http://localhost:3000"}},
   "callbacks": {"enabled":true,"timeout_ms":10000,"max_attempts":3,"retry_backoff_ms":1000,"public_base_url":""},
-  "specs":     {"dir":"specs","concepts_dir":""},
+  "specs":     {"dir":"specs","concepts_dir":"","watch":true,"watch_interval_ms":2000},
   "logging":   {"level":"info","file":"","requests":true}
 }
 ```
@@ -348,7 +360,7 @@ src/
   notify/                  callback_notifier（callback_url 投递与重试）
   report/                  report_writer（JUnit XML / HTML）
   runner/                  runner, mock_runner, process_runner, runner_bridge
-  spec/                    spec, spec_parser, spec_repository
+  spec/                    spec, spec_parser, spec_repository, spec_watcher（目录轮询监控）
   event/                   event_bus
   model/                   types, json_convert
   util/                    json, http_client, sha1, base64, logger, string_util, file_util, time_util

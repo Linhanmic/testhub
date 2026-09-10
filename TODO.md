@@ -5,7 +5,7 @@
 ## 当前状态（v1.1.0）
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
-- 83 个自动化测试全部通过（63 单元 + 13 集成 + 7 Python 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
+- 88 个自动化测试全部通过（67 单元 + 14 集成 + 7 Python 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
 - 约 12k 行（含前端、Python Runner、测试）
 
 ## 路线图
@@ -27,12 +27,12 @@
 - [x] 报表导出：`GET /tests/{id}/report?format=junit|html`，UI 详情页一键下载
 - [x] 回调通知：`callback_url` 完成后 POST 摘要，指数退避重试，`callback.*` 事件与状态计数
 - [x] 鉴权：`server.auth_token` Bearer Token（写操作 / 可选全保护），UI token 输入与 401 处理
+- [x] 规范目录监控：轮询快照，外部变更自动重载概念并推送 `specs.reloaded`，UI 实时刷新
 
 ### P1 — 下一步（按优先级）
 
 - [ ] **Runner 池**：`max_concurrent_tests > 1` 时启动多个 Runner 进程真正并行（当前为场景级串行）
 - [ ] **Node.js 参考 Runner**：复用 JSON-lines 协议，验证语言无关性
-- [ ] **规范目录监控**：文件变更自动 reload 并推送 `specs.reloaded`
 
 ### P2 — 增强
 
@@ -140,6 +140,15 @@
 - 顺带修复引擎竞态：终态先写入 `records_` 再落盘，轮询到终态的客户端可能读不到结果文件（本地循环 40 次复现 1 次）；现在先序列化副本再发布终态，取消路径同样处理
 - 测试：新增 40 次 WS 秒连秒断的回归测试；WS 过滤测试改为等待 `subscribed` 确认后再提交；gcc/clang 各循环 60 次、TSan 全量运行零告警
 
+### 迭代 13 — 规范目录监控
+
+- 新增 `spec/spec_watcher.*`：后台线程按 `specs.watch_interval_ms`（默认 2 s）对规范目录与概念目录做 `{mtime,size}` 快照并 diff；新增/修改/删除合并为一个 `specs.reloaded`（`source=watcher`，含计数与文件清单）；`.cpt` 变化时重载概念字典
+- 稳定窗口（200 ms）：刚写入的文件推迟一轮，避免解析编辑器写了一半的内容；API 写入后 `acknowledge()` 防止重复报告；`POST /specs/reload` 同时触发扫描并返回 `changes`
+- 配置 `specs.watch` / `specs.watch_interval_ms`，CLI `--watch-interval` / `--no-watch`；`/status.spec_watcher` 暴露跟踪文件数、扫描/变更/重载次数与最近变更时间
+- UI：规范页收到 watcher 事件时弹出"规范目录已变化：新增 1"并自动刷新列表；总览"服务"卡片新增"规范监控"行；事件流渲染 `source/files/created/updated/deleted`（零值隐藏）
+- 测试：4 个单测（增删改检测与相对路径、概念重载、acknowledge 与稳定窗口、后台线程/禁用模式）+ 1 个集成测试（外部写入/删除被运行中的服务器发现、`/specs` `/concepts` 同步、API 写入不重复报告、状态计数、手动 reload 的 changes）
+- 浏览器实测：打开规范页 → 终端写入 `watch-demo.spec` → 列表自动出现新行；删除后自动消失；总览显示"每 1 s · 5 个文件 · 2 次变更"
+
 ---
 
 ## 决策记录
@@ -156,6 +165,7 @@
 | 迭代 9 | 报表按需渲染而非随结果落盘 | 结果 JSON 已是事实来源，报表只是视图；避免多份文件不一致，格式演进无需迁移 |
 | 迭代 10 | 回调客户端自研且仅支持 http:// | 保持零依赖；HTTPS 需要 TLS 库，交给反向代理/内网中转更符合守护进程的部署形态 |
 | 迭代 11 | 单一共享 token，默认只保护写操作 | 守护进程多部署在内网/CI；先解决"误操作与未授权写入"，读保护按需开启；多用户/角色留待有明确需求时再做 |
+| 迭代 13 | 目录监控用轮询快照而非 inotify/FSEvents | 零依赖、三平台同一实现、无需处理事件合并与队列溢出；规范目录规模小，秒级轮询开销可忽略；稳定窗口天然解决编辑器分步写入 |
 
 ---
 
@@ -164,7 +174,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 83 个，全部通过；`ctest` 约 2 s；TSan 零告警 |
+| 自动化测试 | 88 个，全部通过；`ctest` 约 3 s；TSan 零告警 |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
 | 代码规模 | 约 14k 行（C++ 约 10.2k，前端约 1.2k，Python 约 0.7k，测试约 2.4k） |
