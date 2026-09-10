@@ -28,3 +28,6 @@ reports/
 __pycache__/
 *.pyc
 node_modules/
+
+# Playwright MCP 浏览器测试产物
+.playwright-mcp/
