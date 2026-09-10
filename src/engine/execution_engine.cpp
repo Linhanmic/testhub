@@ -701,15 +701,16 @@ SpecResult ExecutionEngine::executeSpec(RunContext& ctx, const spec::Specificati
             }
             result.scenarioResults.push_back(sr);
             switch (sr.state) {
-                case TestState::PASSED: passed++; ctx.status.passedScenarios++; break;
-                case TestState::FAILED: failed++; ctx.status.failedScenarios++; break;
-                case TestState::TEST_ERROR: errored++; ctx.status.failedScenarios++; break;
+                case TestState::PASSED: passed++; ctx.status.passedScenarios++; ctx.status.executedScenarios++; break;
+                case TestState::FAILED: failed++; ctx.status.failedScenarios++; ctx.status.executedScenarios++; break;
+                case TestState::TEST_ERROR: errored++; ctx.status.failedScenarios++; ctx.status.executedScenarios++; break;
                 case TestState::CANCELLED: skipped++; ctx.status.skippedScenarios++; break;
                 default: skipped++; ctx.status.skippedScenarios++; break;
             }
-            ctx.status.executedScenarios++;
+            // 进度按“已处理”（含跳过）计算，executedScenarios 只统计真正运行过的场景
+            int processed = ctx.status.executedScenarios + ctx.status.skippedScenarios;
             if (ctx.status.totalScenarios > 0) {
-                ctx.status.progress = std::min(1.0, static_cast<double>(ctx.status.executedScenarios) / ctx.status.totalScenarios);
+                ctx.status.progress = std::min(1.0, static_cast<double>(processed) / ctx.status.totalScenarios);
             }
             if (ctx.request.failFast && (sr.state == TestState::FAILED || sr.state == TestState::TEST_ERROR)) {
                 ctx.failFastTriggered = true;
@@ -757,6 +758,9 @@ ScenarioResult ExecutionEngine::executeScenario(RunContext& ctx, const spec::Spe
             result.dataRow[h] = specification.dataTable.cell(static_cast<size_t>(dataRowIndex), h);
         }
     }
+
+    // 多个测试并发时，整个场景独占 Runner，避免不同场景的步骤在有状态 Runner 中交错
+    RunnerBridge::Session session = runner_.acquireSession();
 
     auto start = std::chrono::steady_clock::now();
     std::map<std::string, std::string> eventData = {

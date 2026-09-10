@@ -95,6 +95,13 @@ public:
     virtual std::string version() const { return ""; }
 
     /**
+     * 是否允许多个场景并发地调用 executeStep。
+     * 单进程、有状态的 Runner（如 Python 参考实现）必须返回 false，
+     * 桥接层会以场景为粒度串行化对其的访问。
+     */
+    virtual bool isConcurrencySafe() const { return false; }
+
+    /**
      * 执行一个步骤
      */
     virtual StepResult executeStep(const StepExecutionRequest& request) = 0;

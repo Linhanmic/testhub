@@ -25,6 +25,7 @@ public:
     bool isAlive() const override { return alive_; }
     std::string name() const override { return "mock"; }
     std::string version() const override { return "1.0"; }
+    bool isConcurrencySafe() const override { return true; }
 
     StepResult executeStep(const StepExecutionRequest& request) override;
     HookResult runHook(HookType type, const ExecutionContext& context) override;

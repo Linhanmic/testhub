@@ -56,7 +56,15 @@ public:
     const RunnerConfig& getConfig() const { return config_; }
 
     /**
-     * 执行步骤（线程安全，串行化访问 Runner；Runner 崩溃时按配置自动重启）
+     * 场景级会话：对于非并发安全的 Runner，持有该锁期间其他线程无法向 Runner 发送步骤，
+     * 保证同一场景的步骤不会与其他场景交错执行（Runner 内部的场景状态因此保持一致）。
+     * 对并发安全的 Runner（如内置 mock）返回未加锁的空对象。
+     */
+    using Session = std::unique_lock<std::recursive_mutex>;
+    Session acquireSession();
+
+    /**
+     * 执行步骤（线程安全；非并发安全的 Runner 会被串行化；Runner 崩溃时按配置自动重启）
      */
     StepResult executeStep(const StepExecutionRequest& request);
 
@@ -76,9 +84,10 @@ public:
 
 private:
     RunnerConfig config_;
-    std::unique_ptr<Runner> runner_;
+    std::shared_ptr<Runner> runner_;   // shared：执行线程持有引用期间即使被 stop/restart 也不会悬空
     mutable std::mutex mutex_;          // 保护状态
-    std::mutex execMutex_;              // 串行化执行
+    std::recursive_mutex execMutex_;    // 串行化执行（可递归：会话内再执行步骤）
+    std::atomic<bool> concurrencySafe_{false};
     RunnerState state_ = RunnerState::DISCONNECTED;
     int restartCount_ = 0;
     std::string lastError_;
