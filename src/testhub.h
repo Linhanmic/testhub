@@ -8,6 +8,7 @@
 #include "engine/execution_engine.h"
 #include "event/event_bus.h"
 #include "model/types.h"
+#include "notify/callback_notifier.h"
 #include "runner/runner_bridge.h"
 #include "server/http_server.h"
 #include "server/websocket_server.h"
@@ -51,6 +52,13 @@ struct TestHubConfig {
     std::string resultsDir = "data/results";   // 结果持久化目录；空表示禁用
     std::map<std::string, std::string> environment;
 
+    // 回调通知（callback_url）
+    bool callbacksEnabled = true;
+    int callbackTimeoutMs = 10000;
+    int callbackMaxAttempts = 3;
+    int callbackRetryBackoffMs = 1000;
+    std::string publicBaseUrl;     // 回调载荷中 links 的前缀，如 http://ci.example.com:8080
+
     // 规范
     std::string specsDir = "specs";
     std::string conceptsDir;
@@ -88,6 +96,7 @@ public:
     WebSocketServer& getWebSocketServer() { return *wsServer_; }
     ExecutionEngine& getEngine() { return *engine_; }
     RunnerBridge& getRunnerBridge() { return *runnerBridge_; }
+    CallbackNotifier& getNotifier() { return *notifier_; }
     spec::SpecRepository& getSpecs() { return specs_; }
     EventBus& getEventBus() { return EventBus::getInstance(); }
 
@@ -110,6 +119,7 @@ private:
     std::unique_ptr<WebSocketServer> wsServer_;
     std::unique_ptr<RunnerBridge> runnerBridge_;
     std::unique_ptr<ExecutionEngine> engine_;
+    std::unique_ptr<CallbackNotifier> notifier_;
 
     std::atomic<bool> running_{false};
     std::atomic<bool> initialized_{false};

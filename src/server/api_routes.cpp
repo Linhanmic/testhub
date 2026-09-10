@@ -5,6 +5,7 @@
 #include "../testhub.h"
 #include "../model/json_convert.h"
 #include "../report/report_writer.h"
+#include "../util/http_client.h"
 #include "../util/logger.h"
 #include "../util/string_util.h"
 
@@ -81,6 +82,12 @@ void TestHub::registerApiRoutes() {
         TestRequest request;
         std::string error;
         if (!testRequestFromJson(body, request, error)) return HttpResponse::error(400, error);
+        if (!request.callbackUrl.empty()) {
+            ParsedUrl parsed;
+            if (!HttpClient::parseUrl(request.callbackUrl, parsed, &error)) {
+                return HttpResponse::error(400, "Invalid callback_url: " + error);
+            }
+        }
         try {
             std::string id = engine_->submit(request);
             Json j = Json::object();

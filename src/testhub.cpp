@@ -44,6 +44,13 @@ void TestHubConfig::applyJson(const Json& json) {
         }
     }
 
+    const Json& callbacks = json["callbacks"];
+    if (callbacks["enabled"].isBool()) callbacksEnabled = callbacks["enabled"].asBool();
+    if (callbacks["timeout_ms"].isNumber()) callbackTimeoutMs = callbacks["timeout_ms"].asInt();
+    if (callbacks["max_attempts"].isNumber()) callbackMaxAttempts = callbacks["max_attempts"].asInt();
+    if (callbacks["retry_backoff_ms"].isNumber()) callbackRetryBackoffMs = callbacks["retry_backoff_ms"].asInt();
+    if (callbacks["public_base_url"].isString()) publicBaseUrl = callbacks["public_base_url"].asString();
+
     const Json& specs = json["specs"];
     if (specs["default_dir"].isString()) specsDir = specs["default_dir"].asString();
     if (specs["dir"].isString()) specsDir = specs["dir"].asString();
@@ -84,6 +91,14 @@ Json TestHubConfig::toJson() const {
     execution["results_dir"] = resultsDir;
     execution["environment"] = testhub::toJson(environment);
     j["execution"] = execution;
+
+    Json callbacks = Json::object();
+    callbacks["enabled"] = callbacksEnabled;
+    callbacks["timeout_ms"] = callbackTimeoutMs;
+    callbacks["max_attempts"] = callbackMaxAttempts;
+    callbacks["retry_backoff_ms"] = callbackRetryBackoffMs;
+    callbacks["public_base_url"] = publicBaseUrl;
+    j["callbacks"] = callbacks;
 
     Json specs = Json::object();
     specs["dir"] = specsDir;
@@ -140,6 +155,15 @@ bool TestHub::initialize(const TestHubConfig& config) {
     engineConfig.environment = config_.environment;
     engine_->configure(engineConfig);
 
+    notifier_ = std::make_unique<CallbackNotifier>(*engine_);
+    CallbackConfig callbackConfig;
+    callbackConfig.enabled = config_.callbacksEnabled;
+    callbackConfig.timeoutMs = config_.callbackTimeoutMs;
+    callbackConfig.maxAttempts = config_.callbackMaxAttempts;
+    callbackConfig.retryBackoffMs = config_.callbackRetryBackoffMs;
+    callbackConfig.publicBaseUrl = config_.publicBaseUrl;
+    notifier_->configure(callbackConfig);
+
     registerApiRoutes();
     if (config_.enableWebUi) registerWebUi();
     wsServer_->attach(*httpServer_, "/ws/v1/events");
@@ -178,6 +202,7 @@ bool TestHub::start() {
         TH_LOG_ERROR("testhub", "Failed to start HTTP server: " + httpServer_->lastError());
         return false;
     }
+    notifier_->start();
     engine_->start();
     startedAt_ = TimeUtil::now();
     running_ = true;
@@ -197,6 +222,7 @@ void TestHub::stop() {
     EventBus::getInstance().waitForIdle(1000);
 
     if (engine_) engine_->stop();
+    if (notifier_) notifier_->stop();
     if (wsServer_) wsServer_->stop();
     if (httpServer_) httpServer_->stop();
     if (runnerBridge_) runnerBridge_->stopRunner();
@@ -235,6 +261,16 @@ Json TestHub::statusJson() const {
         stats["total_duration"] = s.totalDuration;
         stats["history_size"] = static_cast<int>(engine_->count());
         j["stats"] = stats;
+    }
+    if (notifier_) {
+        CallbackStats c = notifier_->stats();
+        Json cb = Json::object();
+        cb["enabled"] = notifier_->config().enabled;
+        cb["pending"] = static_cast<int>(c.pending);
+        cb["delivered"] = static_cast<int>(c.delivered);
+        cb["failed"] = static_cast<int>(c.failed);
+        cb["attempts"] = static_cast<int>(c.attempts);
+        j["callbacks"] = cb;
     }
     if (httpServer_) {
         Json http = Json::object();

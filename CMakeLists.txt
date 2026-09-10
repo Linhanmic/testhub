@@ -65,7 +65,9 @@ set(TESTHUB_CORE_SOURCES
     src/engine/execution_engine.cpp
     src/engine/result_store.cpp
     src/event/event_bus.cpp
+    src/notify/callback_notifier.cpp
     src/report/report_writer.cpp
+    src/util/http_client.cpp
     src/runner/mock_runner.cpp
     src/runner/process_runner.cpp
     src/runner/runner_bridge.cpp
