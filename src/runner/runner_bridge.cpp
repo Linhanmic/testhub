@@ -8,8 +8,66 @@
 #include "../util/logger.h"
 
 #include <cstdlib>
+#include <filesystem>
+#include <vector>
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 namespace testhub {
+
+namespace {
+
+std::string executableDir() {
+#ifdef _WIN32
+    return "";
+#else
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return "";
+    buf[n] = '\0';
+    return std::filesystem::path(buf).parent_path().string();
+#endif
+}
+
+std::string quoteShell(const std::string& s) {
+    if (s.find_first_of(" \t\"'$`\\") == std::string::npos) return s;
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') out += "'\\''";
+        else out.push_back(c);
+    }
+    out += "'";
+    return out;
+}
+
+/**
+ * 在若干候选目录中查找随 TestHub 发布的 runner 脚本
+ */
+std::string locateBundledRunner(const std::string& relative) {
+    std::vector<std::string> roots;
+    if (const char* home = std::getenv("TESTHUB_HOME")) {
+        if (*home) roots.push_back(home);
+    }
+    std::string exeDir = executableDir();
+    if (!exeDir.empty()) {
+        roots.push_back(exeDir);
+        roots.push_back((std::filesystem::path(exeDir) / "..").string());
+        roots.push_back((std::filesystem::path(exeDir) / ".." / "share" / "testhub").string());
+    }
+    roots.push_back(".");
+    for (const auto& root : roots) {
+        std::filesystem::path candidate = std::filesystem::path(root) / relative;
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(candidate, ec)) {
+            return std::filesystem::weakly_canonical(candidate, ec).string();
+        }
+    }
+    return "";
+}
+
+} // namespace
 
 RunnerBridge::RunnerBridge() = default;
 RunnerBridge::~RunnerBridge() { stopRunner(); }
@@ -18,7 +76,11 @@ std::string RunnerBridge::defaultCommandForLanguage(const std::string& language)
     if (const char* env = std::getenv("TESTHUB_RUNNER_CMD")) {
         if (*env) return env;
     }
-    if (language == "python" || language == "py") return "python3 -m testhub_runner";
+    if (language == "python" || language == "py") {
+        std::string script = locateBundledRunner("runners/python/testhub_runner.py");
+        if (!script.empty()) return "python3 " + quoteShell(script);
+        return "python3 -m testhub_runner";
+    }
     if (language == "node" || language == "js" || language == "javascript") return "node testhub-runner.js";
     if (language == "mock" || language == "none" || language.empty()) return "";
     return "testhub-runner-" + language;
@@ -72,11 +134,17 @@ bool RunnerBridge::startLocked() {
         return false;
     }
     state_ = RunnerState::CONNECTED;
+    concurrencySafe_ = runner_->isConcurrencySafe();
     startedAt_ = TimeUtil::now();
     lastHeartbeat_ = startedAt_;
     lastError_.clear();
     publish(EventType::RUNNER_CONNECTED, runner_->name() + " connected");
     return true;
+}
+
+RunnerBridge::Session RunnerBridge::acquireSession() {
+    if (concurrencySafe_) return Session();
+    return Session(execMutex_);
 }
 
 void RunnerBridge::stopLocked() {
@@ -91,13 +159,13 @@ void RunnerBridge::stopLocked() {
 }
 
 void RunnerBridge::stopRunner() {
-    std::lock_guard<std::mutex> execLock(execMutex_);
+    std::lock_guard<std::recursive_mutex> execLock(execMutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     stopLocked();
 }
 
 bool RunnerBridge::restartRunner() {
-    std::lock_guard<std::mutex> execLock(execMutex_);
+    std::lock_guard<std::recursive_mutex> execLock(execMutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     stopLocked();
     ++restartCount_;
@@ -125,11 +193,15 @@ RunnerStatus RunnerBridge::getStatus() const {
     status.startedAt = startedAt_;
     status.restartCount = restartCount_;
     status.lastError = lastError_;
+    if (runner_ && runner_->isAlive()) {
+        // 步骤列表在首次查询后由 Runner 缓存，此处不会阻塞在网络往返上
+        for (const auto& s : runner_->getAllSteps()) status.implementedSteps.push_back(s.parameterizedStepText);
+    }
     return status;
 }
 
 bool RunnerBridge::ensureAlive() {
-    // 调用方持有 execMutex_
+    // 调用方持有 execMutex_（并发安全的 Runner 除外，此时不会发生重启竞争：mock 永不退出）
     std::lock_guard<std::mutex> lock(mutex_);
     if (runner_ && runner_->isAlive()) return true;
     if (!config_.autoRestart) {
@@ -152,7 +224,7 @@ bool RunnerBridge::ensureAlive() {
 }
 
 StepResult RunnerBridge::executeStep(const StepExecutionRequest& request) {
-    std::lock_guard<std::mutex> execLock(execMutex_);
+    Session execLock = acquireSession();
     if (!ensureAlive()) {
         StepResult r;
         r.stepText = request.stepText;
@@ -161,11 +233,11 @@ StepResult RunnerBridge::executeStep(const StepExecutionRequest& request) {
         r.errorMessage = lastError_.empty() ? "Runner not connected" : lastError_;
         return r;
     }
-    Runner* runner = nullptr;
+    std::shared_ptr<Runner> runner;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         state_ = RunnerState::BUSY;
-        runner = runner_.get();
+        runner = runner_;
     }
     StepExecutionRequest req = request;
     if (req.timeoutMs <= 0) req.timeoutMs = config_.requestTimeoutMs;
@@ -185,39 +257,39 @@ StepResult RunnerBridge::executeStep(const StepExecutionRequest& request) {
 }
 
 HookResult RunnerBridge::runHook(HookType type, const ExecutionContext& context) {
-    std::lock_guard<std::mutex> execLock(execMutex_);
+    Session execLock = acquireSession();
     if (!ensureAlive()) {
         HookResult r;
         r.success = false;
         r.errorMessage = lastError_.empty() ? "Runner not connected" : lastError_;
         return r;
     }
-    Runner* runner = nullptr;
+    std::shared_ptr<Runner> runner;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        runner = runner_.get();
+        runner = runner_;
     }
     return runner->runHook(type, context);
 }
 
 std::vector<StepValue> RunnerBridge::getAllSteps() {
-    std::lock_guard<std::mutex> execLock(execMutex_);
+    std::lock_guard<std::recursive_mutex> execLock(execMutex_);
     if (!ensureAlive()) return {};
-    Runner* runner = nullptr;
+    std::shared_ptr<Runner> runner;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        runner = runner_.get();
+        runner = runner_;
     }
     return runner->getAllSteps();
 }
 
 bool RunnerBridge::hasStep(const std::string& parameterizedText) {
-    std::lock_guard<std::mutex> execLock(execMutex_);
+    std::lock_guard<std::recursive_mutex> execLock(execMutex_);
     if (!ensureAlive()) return true;
-    Runner* runner = nullptr;
+    std::shared_ptr<Runner> runner;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        runner = runner_.get();
+        runner = runner_;
     }
     return runner->hasStep(parameterizedText);
 }
