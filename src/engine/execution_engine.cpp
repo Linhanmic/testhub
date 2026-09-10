@@ -694,7 +694,19 @@ SpecResult ExecutionEngine::executeSpec(RunContext& ctx, const spec::Specificati
                 sr.lineNumber = scenario.lineNumber;
                 sr.dataRowIndex = specification.isDataDriven() ? row : -1;
                 sr.state = ctx.cancelled->load() ? TestState::CANCELLED : TestState::SKIPPED;
-                sr.errorMessage = !beforeSpec.success ? "Skipped because before_spec hook failed" : "Skipped";
+                if (!beforeSpec.success) sr.errorMessage = "Skipped because before_spec hook failed";
+                else if (ctx.cancelled->load()) sr.errorMessage = "Skipped because the test was cancelled";
+                else if (ctx.timedOut) sr.errorMessage = "Skipped because the test timed out";
+                else sr.errorMessage = "Skipped";
+                // 保留步骤列表（全部标记为跳过），便于结果视图展示完整场景结构
+                for (const auto& step : scenario.steps) {
+                    StepResult skippedStep;
+                    skippedStep.stepText = step.text;
+                    skippedStep.parameterizedText = step.parameterizedText;
+                    skippedStep.isConcept = step.isConcept;
+                    skippedStep.state = TestState::SKIPPED;
+                    sr.stepResults.push_back(skippedStep);
+                }
             } else {
                 ctx.status.currentScenario = scenario.name;
                 sr = executeScenario(ctx, specification, scenario, specification.isDataDriven() ? row : -1);
