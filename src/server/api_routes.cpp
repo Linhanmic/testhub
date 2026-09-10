@@ -65,6 +65,8 @@ void TestHub::registerApiRoutes() {
         j["running"] = running_.load();
         j["uptime_seconds"] = running_ ? std::chrono::duration<double>(TimeUtil::now() - startedAt_).count() : 0.0;
         j["runner"] = runnerBridge_ ? runnerStateToString(runnerBridge_->getStatus().state) : "none";
+        j["auth_required"] = auth_.enabled();
+        j["auth_protect_reads"] = auth_.enabled() && auth_.config().protectReads;
         return HttpResponse::json(200, j);
     });
 

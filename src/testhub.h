@@ -10,6 +10,7 @@
 #include "model/types.h"
 #include "notify/callback_notifier.h"
 #include "runner/runner_bridge.h"
+#include "server/auth.h"
 #include "server/http_server.h"
 #include "server/websocket_server.h"
 #include "spec/spec_repository.h"
@@ -33,6 +34,8 @@ struct TestHubConfig {
     int httpWorkerThreads = 8;
     bool enableWebUi = true;
     std::string webDir;            // 若设置则从磁盘提供 Web UI（开发模式），否则使用内嵌资源
+    std::string authToken;         // 非空时启用 Bearer Token 鉴权（写操作）
+    bool authProtectReads = false; // 是否同时保护 GET 与 WebSocket
 
     // Runner
     std::string runnerLanguage = "mock";
@@ -72,7 +75,8 @@ struct TestHubConfig {
      * 从 JSON 配置文件合并（存在的键覆盖当前值）
      */
     void applyJson(const Json& json);
-    Json toJson() const;
+    /** maskSecrets 为 true 时 auth_token 以 "***" 输出（用于 --print-config 与 GET /config） */
+    Json toJson(bool maskSecrets = true) const;
 };
 
 /**
@@ -97,6 +101,7 @@ public:
     ExecutionEngine& getEngine() { return *engine_; }
     RunnerBridge& getRunnerBridge() { return *runnerBridge_; }
     CallbackNotifier& getNotifier() { return *notifier_; }
+    const AuthPolicy& getAuth() const { return auth_; }
     spec::SpecRepository& getSpecs() { return specs_; }
     EventBus& getEventBus() { return EventBus::getInstance(); }
 
@@ -120,6 +125,7 @@ private:
     std::unique_ptr<RunnerBridge> runnerBridge_;
     std::unique_ptr<ExecutionEngine> engine_;
     std::unique_ptr<CallbackNotifier> notifier_;
+    AuthPolicy auth_;
 
     std::atomic<bool> running_{false};
     std::atomic<bool> initialized_{false};

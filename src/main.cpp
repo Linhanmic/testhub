@@ -53,6 +53,8 @@ void printUsage(const char* program) {
         << "      --no-persist           不持久化结果，仅保存在内存\n"
         << "      --public-url <url>     回调载荷中链接的公开地址前缀（如 http://ci.example.com:8080）\n"
         << "      --no-callbacks         禁用 callback_url 完成回调\n"
+        << "      --auth-token <token>   启用 Bearer Token 鉴权（也可用环境变量 TESTHUB_AUTH_TOKEN）\n"
+        << "      --auth-protect-reads   鉴权同时覆盖 GET 与 WebSocket（默认只保护写操作）\n"
         << "      --log-level <level>    debug | info | warn | error | off\n"
         << "      --log-file <file>      日志文件\n"
         << "      --no-ui                不提供 Web UI\n"
@@ -74,7 +76,7 @@ bool needsValue(const std::string& opt) {
     static const char* withValue[] = {
         "-p", "--port", "-H", "--host", "-l", "--language", "-r", "--runner-cmd", "-d", "--dir",
         "-s", "--specs", "--concepts", "-c", "--config", "-j", "--concurrency", "--timeout",
-        "--results-dir", "--public-url", "--log-level", "--log-file", "--web-dir", "--pid-file"};
+        "--results-dir", "--public-url", "--auth-token", "--log-level", "--log-file", "--web-dir", "--pid-file"};
     for (const char* w : withValue) {
         if (opt == w) return true;
     }
@@ -119,6 +121,10 @@ int main(int argc, char* argv[]) {
             return 2;
         }
         config.applyJson(json);
+    }
+    // 环境变量优先级介于配置文件与命令行之间，便于在容器中注入密钥
+    if (const char* envToken = std::getenv("TESTHUB_AUTH_TOKEN"); envToken && *envToken) {
+        config.authToken = envToken;
     }
 
     for (int i = 1; i < argc; ++i) {
@@ -167,6 +173,10 @@ int main(int argc, char* argv[]) {
             config.publicBaseUrl = value;
         } else if (opt == "--no-callbacks") {
             config.callbacksEnabled = false;
+        } else if (opt == "--auth-token") {
+            config.authToken = value;
+        } else if (opt == "--auth-protect-reads") {
+            config.authProtectReads = true;
         } else if (opt == "--log-level") {
             config.logLevel = value;
         } else if (opt == "--log-file") {

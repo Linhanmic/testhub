@@ -21,6 +21,8 @@ void TestHubConfig::applyJson(const Json& json) {
     if (server["worker_threads"].isNumber()) httpWorkerThreads = server["worker_threads"].asInt();
     if (server["web_ui"].isBool()) enableWebUi = server["web_ui"].asBool();
     if (server["web_dir"].isString()) webDir = server["web_dir"].asString();
+    if (server["auth_token"].isString()) authToken = server["auth_token"].asString();
+    if (server["auth_protect_reads"].isBool()) authProtectReads = server["auth_protect_reads"].asBool();
 
     const Json& runner = json["runner"];
     if (runner["language"].isString()) runnerLanguage = runner["language"].asString();
@@ -62,7 +64,7 @@ void TestHubConfig::applyJson(const Json& json) {
     if (logging["requests"].isBool()) logRequests = logging["requests"].asBool();
 }
 
-Json TestHubConfig::toJson() const {
+Json TestHubConfig::toJson(bool maskSecrets) const {
     Json j = Json::object();
     Json server = Json::object();
     server["host"] = host;
@@ -70,6 +72,8 @@ Json TestHubConfig::toJson() const {
     server["worker_threads"] = httpWorkerThreads;
     server["web_ui"] = enableWebUi;
     if (!webDir.empty()) server["web_dir"] = webDir;
+    server["auth_token"] = authToken.empty() ? "" : (maskSecrets ? "***" : authToken);
+    server["auth_protect_reads"] = authProtectReads;
     j["server"] = server;
 
     Json runner = Json::object();
@@ -164,6 +168,14 @@ bool TestHub::initialize(const TestHubConfig& config) {
     callbackConfig.publicBaseUrl = config_.publicBaseUrl;
     notifier_->configure(callbackConfig);
 
+    AuthConfig authConfig;
+    authConfig.token = config_.authToken;
+    authConfig.protectReads = config_.authProtectReads;
+    auth_.configure(authConfig);
+    if (auth_.enabled()) {
+        httpServer_->setRequestFilter([this](const HttpRequest& req, HttpResponse& denied) { return auth_.authorize(req, denied); });
+    }
+
     registerApiRoutes();
     if (config_.enableWebUi) registerWebUi();
     wsServer_->attach(*httpServer_, "/ws/v1/events");
@@ -211,6 +223,11 @@ bool TestHub::start() {
                            (config_.host == "0.0.0.0" ? "localhost" : config_.host) + ":" + std::to_string(boundPort()));
     TH_LOG_INFO("testhub", "Specs directory: " + specs_.specsDir());
     TH_LOG_INFO("testhub", "Runner: " + config_.runnerLanguage + (config_.runnerCommand.empty() ? "" : " (" + config_.runnerCommand + ")"));
+    if (auth_.enabled()) {
+        TH_LOG_INFO("testhub", std::string("Auth: Bearer token required for ") + (config_.authProtectReads ? "all API requests and WebSocket" : "write operations"));
+    } else {
+        TH_LOG_WARN("testhub", "Auth: disabled (set server.auth_token / --auth-token / TESTHUB_AUTH_TOKEN to protect the API)");
+    }
     publishEvent(EventType::SERVER_STARTED, "", {{"version", version()}, {"port", std::to_string(boundPort())}});
     return true;
 }
@@ -285,6 +302,10 @@ Json TestHub::statusJson() const {
         j["websocket"] = ws;
     }
     j["events_published"] = static_cast<double>(EventBus::getInstance().publishedCount());
+    Json auth = Json::object();
+    auth["enabled"] = auth_.enabled();
+    auth["protect_reads"] = auth_.config().protectReads;
+    j["auth"] = auth;
     return j;
 }
 
