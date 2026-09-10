@@ -169,7 +169,8 @@ private:
     void publish(const std::string& type, const std::string& testId, const std::map<std::string, std::string>& data = {});
     void trimHistory();
     void loadHistory();
-    void persist(const std::string& testId);
+    // 在终态对外可见之前落盘，保证观察到终态的客户端一定能读到结果文件
+    void persist(const TestRecord& record);
     bool checkTimeout(RunContext& ctx);
 };
 

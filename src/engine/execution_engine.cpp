@@ -81,16 +81,10 @@ void ExecutionEngine::loadHistory() {
     trimHistory();
 }
 
-void ExecutionEngine::persist(const std::string& testId) {
+void ExecutionEngine::persist(const TestRecord& record) {
     if (!store_.enabled()) return;
-    TestRecord copy;
-    {
-        std::lock_guard<std::mutex> lock(recordsMutex_);
-        auto it = records_.find(testId);
-        if (it == records_.end() || !isTerminalState(it->second.status.state)) return;
-        copy = it->second;
-    }
-    store_.save(copy);
+    if (!isTerminalState(record.status.state)) return;
+    store_.save(record);
 }
 
 void ExecutionEngine::start() {
@@ -190,32 +184,40 @@ std::string ExecutionEngine::submit(const TestRequest& input) {
 bool ExecutionEngine::cancel(const std::string& testId) {
     bool wasQueued = queue_.cancel(testId);
     std::shared_ptr<std::atomic<bool>> flag;
+    TestRecord cancelled;
     {
         std::lock_guard<std::mutex> lock(recordsMutex_);
         auto it = records_.find(testId);
         if (it == records_.end()) return false;
         if (isTerminalState(it->second.status.state)) return false;
         if (wasQueued) {
-            it->second.status.state = TestState::CANCELLED;
-            it->second.status.endTime = TimeUtil::now();
-            it->second.result.testId = testId;
-            it->second.result.finalState = TestState::CANCELLED;
-            it->second.result.startTime = it->second.status.submitTime;
-            it->second.result.endTime = it->second.status.endTime;
-            it->second.hasResult = true;
-            cancelFlags_.erase(testId);
+            // 已出队，不会再有工作线程执行它：先在副本上构造终态并落盘，再发布到 records_
+            cancelled = it->second;
+            cancelled.status.state = TestState::CANCELLED;
+            cancelled.status.endTime = TimeUtil::now();
+            cancelled.result.testId = testId;
+            cancelled.result.finalState = TestState::CANCELLED;
+            cancelled.result.startTime = cancelled.status.submitTime;
+            cancelled.result.endTime = cancelled.status.endTime;
+            cancelled.hasResult = true;
         } else {
             auto f = cancelFlags_.find(testId);
             if (f != cancelFlags_.end()) flag = f->second;
         }
     }
     if (wasQueued) {
+        persist(cancelled);
+        {
+            std::lock_guard<std::mutex> lock(recordsMutex_);
+            auto it = records_.find(testId);
+            if (it != records_.end()) it->second = cancelled;
+            cancelFlags_.erase(testId);
+        }
         {
             std::lock_guard<std::mutex> lock(statsMutex_);
             stats_.completed++;
             stats_.cancelled++;
         }
-        persist(testId);
         publish(EventType::TEST_CANCELLED, testId, {{"stage", "queued"}});
         return true;
     }
@@ -684,6 +686,17 @@ void ExecutionEngine::execute(const TestTask& task) {
     ctx.status.warnings = ctx.result.warnings;
 
     {
+        // 先落盘再对外可见：轮询到终态的客户端随即读取结果文件/报表时不会落空
+        TestRecord finished;
+        {
+            std::lock_guard<std::mutex> lock(recordsMutex_);
+            auto it = records_.find(ctx.testId);
+            if (it != records_.end()) finished = it->second;
+        }
+        finished.status = ctx.status;
+        finished.result = ctx.result;
+        finished.hasResult = true;
+        persist(finished);
         std::lock_guard<std::mutex> lock(recordsMutex_);
         auto it = records_.find(ctx.testId);
         if (it != records_.end()) {
@@ -708,7 +721,6 @@ void ExecutionEngine::execute(const TestTask& task) {
         stats_.skippedScenarios += ctx.result.skippedScenarios;
         stats_.totalDuration += ctx.result.totalDuration;
     }
-    persist(ctx.testId);
 
     publish(EventType::TEST_COMPLETED, ctx.testId, {
         {"state", testStateToString(ctx.result.finalState)},
