@@ -64,6 +64,7 @@ private:
         int id;
         socket_t socket;
         std::thread reader;
+        std::mutex readerMutex;  // 保护 reader 句柄：读线程可能在 handleUpgrade 完成赋值前就已退出
         std::mutex writeMutex;
         std::atomic<bool> open{true};
         std::vector<std::string> eventPatterns;  // 为空表示全部
@@ -75,6 +76,7 @@ private:
     void readerLoop(std::shared_ptr<Connection> conn);
     bool sendRaw(Connection& conn, const std::string& frame);
     void closeConnection(std::shared_ptr<Connection> conn, bool sendClose);
+    void reapFinishedReaders();
     bool matchesFilter(Connection& conn, const Event& event);
     static bool matchesPattern(const std::string& pattern, const std::string& type);
 

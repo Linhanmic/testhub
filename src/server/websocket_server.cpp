@@ -145,8 +145,22 @@ bool WebSocketServer::handleUpgrade(socket_t socket, const HttpRequest& request)
     hello["server_time"] = TimeUtil::toIso8601(TimeUtil::now());
     sendRaw(*conn, encodeFrame(hello.dump()));
 
-    conn->reader = std::thread(&WebSocketServer::readerLoop, this, conn);
+    reapFinishedReaders();
+    {
+        // 持锁赋值：若读线程立刻结束并进入 closeConnection，会等到句柄就位后再决定如何回收自己
+        std::lock_guard<std::mutex> lock(conn->readerMutex);
+        conn->reader = std::thread(&WebSocketServer::readerLoop, this, conn);
+    }
     return true;
+}
+
+void WebSocketServer::reapFinishedReaders() {
+    std::vector<std::thread> done;
+    {
+        std::lock_guard<std::mutex> lock(finishedMutex_);
+        done.swap(finishedReaders_);
+    }
+    for (auto& t : done) if (t.joinable()) t.join();
 }
 
 bool WebSocketServer::matchesPattern(const std::string& pattern, const std::string& type) {
@@ -287,7 +301,8 @@ void WebSocketServer::closeConnection(std::shared_ptr<Connection> conn, bool sen
 #endif
         closeSock(conn->socket);
         TH_LOG_INFO("ws", "Client disconnected #" + std::to_string(conn->id) + " (total " + std::to_string(connectionCount()) + ")");
-        // 读线程自己结束时不能 join 自己：交给 finished 列表在 stop() 中回收
+        // 读线程自己结束时不能 join 自己：交给 finished 列表，由下次升级或 stop() 回收
+        std::lock_guard<std::mutex> readerLock(conn->readerMutex);
         if (conn->reader.joinable()) {
             if (conn->reader.get_id() == std::this_thread::get_id()) {
                 std::lock_guard<std::mutex> lock(finishedMutex_);
@@ -351,9 +366,7 @@ void WebSocketServer::stop() {
         for (auto& kv : connections_) conns.push_back(kv.second);
     }
     for (auto& c : conns) closeConnection(c, true);
-    std::lock_guard<std::mutex> lock(finishedMutex_);
-    for (auto& t : finishedReaders_) if (t.joinable()) t.join();
-    finishedReaders_.clear();
+    reapFinishedReaders();
 }
 
 } // namespace testhub
