@@ -217,9 +217,10 @@
     const d = ev.data || {};
     const parts = [];
     if (ev.test_id) parts.push(`<a href="#/tests/${esc(ev.test_id)}">${esc(ev.test_id)}</a>`);
-    for (const k of ['state', 'spec', 'scenario', 'step', 'progress', 'detail', 'message', 'error', 'name', 'url', 'status', 'attempts']) {
+    for (const k of ['state', 'spec', 'scenario', 'step', 'progress', 'detail', 'message', 'error', 'name', 'url', 'status', 'attempts', 'source', 'action', 'file', 'files', 'created', 'updated', 'deleted']) {
       if (d[k] !== undefined && d[k] !== '') {
         let v = d[k];
+        if ((k === 'created' || k === 'updated' || k === 'deleted') && v === '0') continue;
         if (k === 'progress') v = `${Math.round(parseFloat(v) * 100)}%`;
         parts.push(`<span class="k">${k}=</span>${esc(v)}`);
       }
@@ -285,6 +286,7 @@
               <dt>WS 连接</dt><dd>${status.websocket.connections}</dd>
               <dt>事件总数</dt><dd>${status.events_published}</dd>
               <dt>概念</dt><dd>${status.concepts}</dd>
+              ${status.spec_watcher ? `<dt>规范监控</dt><dd id="st-watch" title="${status.spec_watcher.last_change_at ? `最近变更 ${esc(fmtTime(status.spec_watcher.last_change_at))}` : '尚无变更'}">${watcherSummary(status.spec_watcher)}</dd>` : ''}
               <dt>历史记录</dt><dd>${s.history_size}</dd>
               ${status.callbacks ? `<dt>回调</dt><dd id="st-callbacks">${status.callbacks.enabled ? `${status.callbacks.delivered} 送达${status.callbacks.failed ? ` · <span style="color:var(--fail)">${status.callbacks.failed} 失败</span>` : ''}${status.callbacks.pending ? ` · ${status.callbacks.pending} 待发` : ''}` : '已禁用'}</dd>` : ''}
             </dl></div>
@@ -307,6 +309,11 @@
           $('#recent-tests').innerHTML = renderTestTable(t.tests);
           const cb = st.callbacks, cbEl = $('#st-callbacks');
           if (cb && cbEl && cb.enabled) cbEl.innerHTML = `${cb.delivered} 送达${cb.failed ? ` · <span style="color:var(--fail)">${cb.failed} 失败</span>` : ''}${cb.pending ? ` · ${cb.pending} 待发` : ''}`;
+          const w = st.spec_watcher, wEl = $('#st-watch');
+          if (w && wEl) {
+            wEl.innerHTML = watcherSummary(w);
+            if (w.last_change_at) wEl.title = `最近变更 ${fmtTime(w.last_change_at)}`;
+          }
         } catch {}
       }, 400);
     };
@@ -317,10 +324,16 @@
       feed.insertAdjacentHTML('afterbegin', renderEvent(ev));
       while (feed.children.length > 150) feed.lastElementChild.remove();
       $('#ev-count').textContent = `+${++count}`;
-      if (/^(test|queue|runner|callback)\./.test(ev.event)) scheduleRefresh();
+      if (/^(test|queue|runner|callback|specs)\./.test(ev.event)) scheduleRefresh();
     });
     return () => { off(); if (refreshTimer) clearTimeout(refreshTimer); };
   };
+
+  function watcherSummary(w) {
+    if (!w.enabled) return '已关闭';
+    const every = w.interval_ms % 1000 === 0 ? `${w.interval_ms / 1000} s` : `${w.interval_ms} ms`;
+    return `每 ${every} · ${w.tracked_files} 个文件${w.changes ? ` · ${w.changes} 次变更` : ''}`;
+  }
 
   function donut(items) {
     const total = items.reduce((a, [, v]) => a + (v || 0), 0);
@@ -717,6 +730,20 @@
       try { await api(`/specs/${name.split('/').map(encodeURIComponent).join('/')}`, { method: 'PUT', body: { content: template } }); toast('已创建', 'ok'); location.hash = `#/specs/${encodeURIComponent(name)}`; }
       catch (e) { toast(e.message, 'error'); }
     };
+    // 目录被外部工具（编辑器、git）修改时由监控器推送 specs.reloaded：提示并刷新列表
+    let t = null;
+    const off = live.on((ev) => {
+      if (ev.event !== 'specs.reloaded' || !ev.data || ev.data.source !== 'watcher') return;
+      const d = ev.data;
+      const parts = [];
+      if (+d.created) parts.push(`新增 ${d.created}`);
+      if (+d.updated) parts.push(`修改 ${d.updated}`);
+      if (+d.deleted) parts.push(`删除 ${d.deleted}`);
+      toast(`规范目录已变化：${parts.join('，') || '已重载'}${d.concepts_reloaded ? '（概念已重载）' : ''}`, 'info');
+      clearTimeout(t);
+      t = setTimeout(navigate, 300);
+    });
+    return () => { off(); clearTimeout(t); };
   };
   async function specDetail(main, file) {
     const enc = file.split('/').map(encodeURIComponent).join('/');

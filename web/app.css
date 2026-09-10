@@ -278,6 +278,7 @@ textarea.editor { min-height: 360px; }
 .feed .type.step { color: var(--text-muted); }
 .feed .type.runner { color: var(--fail); }
 .feed .type.callback { color: var(--pass); }
+.feed .type.specs { color: var(--accent-text); }
 .feed .detail { color: var(--text); word-break: break-word; }
 .feed .detail .k { color: var(--text-muted); }
 
