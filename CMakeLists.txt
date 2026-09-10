@@ -77,6 +77,7 @@ set(TESTHUB_CORE_SOURCES
     src/server/websocket_server.cpp
     src/spec/spec_parser.cpp
     src/spec/spec_repository.cpp
+    src/spec/spec_watcher.cpp
     "${TESTHUB_WEB_ASSETS_CPP}")
 
 add_library(testhub_core STATIC ${TESTHUB_CORE_SOURCES})

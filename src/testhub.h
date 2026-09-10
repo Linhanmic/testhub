@@ -14,6 +14,7 @@
 #include "server/http_server.h"
 #include "server/websocket_server.h"
 #include "spec/spec_repository.h"
+#include "spec/spec_watcher.h"
 #include "util/json.h"
 
 #include <atomic>
@@ -65,6 +66,8 @@ struct TestHubConfig {
     // 规范
     std::string specsDir = "specs";
     std::string conceptsDir;
+    bool specsWatch = true;            // 轮询监控规范目录，自动重载概念并推送 specs.reloaded
+    int specsWatchIntervalMs = 2000;
 
     // 日志
     std::string logLevel = "info";
@@ -103,6 +106,7 @@ public:
     CallbackNotifier& getNotifier() { return *notifier_; }
     const AuthPolicy& getAuth() const { return auth_; }
     spec::SpecRepository& getSpecs() { return specs_; }
+    spec::SpecWatcher& getSpecWatcher() { return specWatcher_; }
     EventBus& getEventBus() { return EventBus::getInstance(); }
 
     /**
@@ -120,6 +124,7 @@ public:
 private:
     TestHubConfig config_;
     spec::SpecRepository specs_;
+    spec::SpecWatcher specWatcher_{specs_};
     std::unique_ptr<HttpServer> httpServer_;
     std::unique_ptr<WebSocketServer> wsServer_;
     std::unique_ptr<RunnerBridge> runnerBridge_;

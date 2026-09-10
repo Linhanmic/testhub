@@ -46,6 +46,8 @@ void printUsage(const char* program) {
         << "  -d, --dir <path>           测试项目目录（Runner 工作目录）\n"
         << "  -s, --specs <path>         规范目录（默认 specs）\n"
         << "      --concepts <path>      概念(.cpt)目录（默认与规范目录相同）\n"
+        << "      --watch-interval <ms>  规范目录轮询间隔（默认 2000，0 禁用）\n"
+        << "      --no-watch             不监控规范目录变化\n"
         << "  -c, --config <file>        JSON 配置文件\n"
         << "  -j, --concurrency <n>      并发执行的测试数（默认 1）\n"
         << "      --timeout <ms>         测试默认超时（毫秒）\n"
@@ -75,7 +77,7 @@ void printUsage(const char* program) {
 bool needsValue(const std::string& opt) {
     static const char* withValue[] = {
         "-p", "--port", "-H", "--host", "-l", "--language", "-r", "--runner-cmd", "-d", "--dir",
-        "-s", "--specs", "--concepts", "-c", "--config", "-j", "--concurrency", "--timeout",
+        "-s", "--specs", "--concepts", "--watch-interval", "-c", "--config", "-j", "--concurrency", "--timeout",
         "--results-dir", "--public-url", "--auth-token", "--log-level", "--log-file", "--web-dir", "--pid-file"};
     for (const char* w : withValue) {
         if (opt == w) return true;
@@ -159,6 +161,11 @@ int main(int argc, char* argv[]) {
             config.specsDir = value;
         } else if (opt == "--concepts") {
             config.conceptsDir = value;
+        } else if (opt == "--watch-interval") {
+            config.specsWatchIntervalMs = parseIntOrExit(opt, value);
+            config.specsWatch = config.specsWatchIntervalMs > 0;
+        } else if (opt == "--no-watch") {
+            config.specsWatch = false;
         } else if (opt == "-c" || opt == "--config") {
             // 已在第一遍处理
         } else if (opt == "-j" || opt == "--concurrency") {

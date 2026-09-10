@@ -340,13 +340,20 @@ void TestHub::registerApiRoutes() {
 
     http.post("/api/v1/specs/reload", [this](const HttpRequest&) {
         auto errors = specs_.reloadConcepts();
+        // 手动重载同时让监控器同步快照并报告期间发生的文件变化
+        spec::SpecChangeSet changes = specWatcher_.scan();
         Json errs = Json::array();
         for (const auto& e : errors) errs.push(toJson(e));
         Json j = Json::object();
         j["concepts"] = static_cast<int>(specs_.concepts().size());
         j["errors"] = errs;
         j["specs"] = static_cast<int>(specs_.list().size());
-        publishEvent(EventType::SPECS_RELOADED, "", {{"concepts", std::to_string(specs_.concepts().size())}});
+        Json ch = Json::object();
+        ch["created"] = toJson(changes.created);
+        ch["updated"] = toJson(changes.updated);
+        ch["deleted"] = toJson(changes.deleted);
+        j["changes"] = ch;
+        publishEvent(EventType::SPECS_RELOADED, "", {{"source", "manual"}, {"concepts", std::to_string(specs_.concepts().size())}});
         return HttpResponse::json(200, j);
     });
 
@@ -407,6 +414,7 @@ void TestHub::registerApiRoutes() {
         }
         if (!specs_.writeRaw(rel, content, &error)) return HttpResponse::error(400, error);
         if (spec::SpecRepository::isConceptFile(rel)) specs_.reloadConcepts();
+        specWatcher_.acknowledge();  // 自己写的文件不再由监控器重复报告
         spec::ParseResult pr = specs_.parseText(content, rel);
         Json j = Json::object();
         j["file"] = rel;
@@ -415,7 +423,7 @@ void TestHub::registerApiRoutes() {
         Json errs = Json::array();
         for (const auto& e : pr.errors) errs.push(toJson(e));
         j["errors"] = errs;
-        publishEvent(EventType::SPECS_RELOADED, "", {{"file", rel}, {"action", existed ? "updated" : "created"}});
+        publishEvent(EventType::SPECS_RELOADED, "", {{"source", "api"}, {"file", rel}, {"action", existed ? "updated" : "created"}});
         return HttpResponse::json(existed ? 200 : 201, j);
     });
 
@@ -424,7 +432,8 @@ void TestHub::registerApiRoutes() {
         std::string error;
         if (!specs_.remove(rel, &error)) return HttpResponse::error(error == "File not found" ? 404 : 400, error);
         if (spec::SpecRepository::isConceptFile(rel)) specs_.reloadConcepts();
-        publishEvent(EventType::SPECS_RELOADED, "", {{"file", rel}, {"action", "deleted"}});
+        specWatcher_.acknowledge();
+        publishEvent(EventType::SPECS_RELOADED, "", {{"source", "api"}, {"file", rel}, {"action", "deleted"}});
         Json j = Json::object();
         j["file"] = rel;
         j["deleted"] = true;

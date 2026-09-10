@@ -57,6 +57,8 @@ void TestHubConfig::applyJson(const Json& json) {
     if (specs["default_dir"].isString()) specsDir = specs["default_dir"].asString();
     if (specs["dir"].isString()) specsDir = specs["dir"].asString();
     if (specs["concepts_dir"].isString()) conceptsDir = specs["concepts_dir"].asString();
+    if (specs["watch"].isBool()) specsWatch = specs["watch"].asBool();
+    if (specs["watch_interval_ms"].isNumber()) specsWatchIntervalMs = specs["watch_interval_ms"].asInt();
 
     const Json& logging = json["logging"];
     if (logging["level"].isString()) logLevel = logging["level"].asString();
@@ -107,6 +109,8 @@ Json TestHubConfig::toJson(bool maskSecrets) const {
     Json specs = Json::object();
     specs["dir"] = specsDir;
     specs["concepts_dir"] = conceptsDir;
+    specs["watch"] = specsWatch;
+    specs["watch_interval_ms"] = specsWatchIntervalMs;
     j["specs"] = specs;
 
     Json logging = Json::object();
@@ -139,6 +143,10 @@ bool TestHub::initialize(const TestHubConfig& config) {
     for (const auto& e : conceptErrors) {
         TH_LOG_WARN("specs", e.fileName + ":" + std::to_string(e.lineNumber) + ": " + e.message);
     }
+    spec::SpecWatcherConfig watchConfig;
+    watchConfig.enabled = config_.specsWatch;
+    watchConfig.intervalMs = config_.specsWatchIntervalMs;
+    specWatcher_.configure(watchConfig);
 
     HttpServerConfig httpConfig;
     httpConfig.host = config_.host;
@@ -216,6 +224,7 @@ bool TestHub::start() {
     }
     notifier_->start();
     engine_->start();
+    specWatcher_.start();
     startedAt_ = TimeUtil::now();
     running_ = true;
 
@@ -238,6 +247,7 @@ void TestHub::stop() {
     publishEvent(EventType::SERVER_STOPPING, "", {});
     EventBus::getInstance().waitForIdle(1000);
 
+    specWatcher_.stop();
     if (engine_) engine_->stop();
     if (notifier_) notifier_->stop();
     if (wsServer_) wsServer_->stop();
@@ -260,6 +270,18 @@ Json TestHub::statusJson() const {
     j["uptime_seconds"] = running_ ? std::chrono::duration<double>(TimeUtil::now() - startedAt_).count() : 0.0;
     j["specs_dir"] = specs_.specsDir();
     j["concepts"] = static_cast<int>(specs_.concepts().size());
+    {
+        spec::SpecWatcherStats w = specWatcher_.stats();
+        Json watch = Json::object();
+        watch["enabled"] = w.enabled;
+        watch["interval_ms"] = w.intervalMs;
+        watch["tracked_files"] = static_cast<int>(w.trackedFiles);
+        watch["scans"] = static_cast<double>(w.scans);
+        watch["changes"] = static_cast<double>(w.changes);
+        watch["reloads"] = static_cast<double>(w.reloads);
+        watch["last_change_at"] = w.lastChangeAt;
+        j["spec_watcher"] = watch;
+    }
     if (runnerBridge_) j["runner"] = toJson(runnerBridge_->getStatus());
     if (engine_) {
         EngineStats s = engine_->stats();
