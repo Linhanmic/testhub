@@ -271,6 +271,7 @@ textarea.editor { min-height: 360px; }
 .feed .type.scenario { color: var(--warn); }
 .feed .type.step { color: var(--text-muted); }
 .feed .type.runner { color: var(--fail); }
+.feed .type.callback { color: var(--pass); }
 .feed .detail { color: var(--text); word-break: break-word; }
 .feed .detail .k { color: var(--text-muted); }
 

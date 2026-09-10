@@ -151,7 +151,7 @@
     const d = ev.data || {};
     const parts = [];
     if (ev.test_id) parts.push(`<a href="#/tests/${esc(ev.test_id)}">${esc(ev.test_id)}</a>`);
-    for (const k of ['state', 'spec', 'scenario', 'step', 'progress', 'detail', 'message', 'error', 'name']) {
+    for (const k of ['state', 'spec', 'scenario', 'step', 'progress', 'detail', 'message', 'error', 'name', 'url', 'status', 'attempts']) {
       if (d[k] !== undefined && d[k] !== '') {
         let v = d[k];
         if (k === 'progress') v = `${Math.round(parseFloat(v) * 100)}%`;
@@ -220,6 +220,7 @@
               <dt>事件总数</dt><dd>${status.events_published}</dd>
               <dt>概念</dt><dd>${status.concepts}</dd>
               <dt>历史记录</dt><dd>${s.history_size}</dd>
+              ${status.callbacks ? `<dt>回调</dt><dd id="st-callbacks">${status.callbacks.enabled ? `${status.callbacks.delivered} 送达${status.callbacks.failed ? ` · <span style="color:var(--fail)">${status.callbacks.failed} 失败</span>` : ''}${status.callbacks.pending ? ` · ${status.callbacks.pending} 待发` : ''}` : '已禁用'}</dd>` : ''}
             </dl></div>
           </div>
         </div>
@@ -238,6 +239,8 @@
           $('#st-failed').innerHTML = `${ss.failed}<span class="muted" style="font-size:16px"> / ${ss.errored}</span>`;
           $('#st-rate').textContent = ss.total_scenarios ? Math.round((ss.passed_scenarios / ss.total_scenarios) * 100) + '%' : '-';
           $('#recent-tests').innerHTML = renderTestTable(t.tests);
+          const cb = st.callbacks, cbEl = $('#st-callbacks');
+          if (cb && cbEl && cb.enabled) cbEl.innerHTML = `${cb.delivered} 送达${cb.failed ? ` · <span style="color:var(--fail)">${cb.failed} 失败</span>` : ''}${cb.pending ? ` · ${cb.pending} 待发` : ''}`;
         } catch {}
       }, 400);
     };
@@ -248,7 +251,7 @@
       feed.insertAdjacentHTML('afterbegin', renderEvent(ev));
       while (feed.children.length > 150) feed.lastElementChild.remove();
       $('#ev-count').textContent = `+${++count}`;
-      if (/^(test|queue|runner)\./.test(ev.event)) scheduleRefresh();
+      if (/^(test|queue|runner|callback)\./.test(ev.event)) scheduleRefresh();
     });
     return () => { off(); if (refreshTimer) clearTimeout(refreshTimer); };
   };
@@ -452,6 +455,7 @@
               <dt>环境</dt><dd>${esc(req.environment)}</dd>
               <dt>fail_fast</dt><dd>${req.fail_fast ? '是' : '否'}</dd>
               <dt>超时</dt><dd>${req.timeout_ms ? req.timeout_ms + ' ms' : '默认'}</dd>
+              ${req.callback_url ? `<dt>回调</dt><dd class="mono small">${esc(req.callback_url)}</dd>` : ''}
               <dt>提交</dt><dd>${fmtTime(status.submit_time)}</dd>
               <dt>开始</dt><dd>${fmtTime(status.start_time)}</dd>
               <dt>结束</dt><dd>${fmtTime(status.end_time)}</dd>
@@ -567,6 +571,7 @@
             <label class="field">环境<input type="text" name="environment" value="default"></label>
             <label class="field">超时 (ms) <span class="help">0 表示默认</span><input type="number" name="timeout_ms" value="0" min="0" step="1000"></label>
           </div>
+          <label class="field">完成回调 URL <span class="help">可选，测试结束后 POST JSON 摘要（仅 http://，失败自动重试）</span><input type="url" name="callback_url" placeholder="http://ci.example.com/hooks/testhub"></label>
           <label class="check"><input type="checkbox" name="fail_fast"> 首个失败场景后停止 (fail_fast)</label>
           <div class="flex"><button class="btn primary" type="submit">▶ 提交</button><span class="muted small" id="run-msg"></span></div>
         </div></form>
@@ -583,6 +588,7 @@
       body.priority = fd.get('priority'); body.environment = fd.get('environment') || 'default';
       const to = parseInt(fd.get('timeout_ms') || '0', 10); if (to > 0) body.timeout_ms = to;
       if (fd.get('fail_fast')) body.fail_fast = true;
+      if ((fd.get('callback_url') || '').trim()) body.callback_url = fd.get('callback_url').trim();
       return body;
     };
     const preview = () => { $('#curl-preview').textContent = `curl -X POST ${location.origin}/api/v1/tests/run \\\n  -H 'Content-Type: application/json' \\\n  -d '${JSON.stringify(build(), null, 2).replace(/'/g, "'\\''")}'`; };
