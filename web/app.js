@@ -46,8 +46,60 @@
     return `<span class="param">${whole}</span>`;
   });
 
+  // ------------------------------------------------------------
+  // 鉴权：token 保存在 localStorage，随请求以 Authorization: Bearer 发送
+  // ------------------------------------------------------------
+  const auth = {
+    key: 'testhub.token', required: false, protectReads: false, invalid: false, promptOpen: false,
+    get token() { return localStorage.getItem(this.key) || ''; },
+    set(t) { if (t) localStorage.setItem(this.key, t); else localStorage.removeItem(this.key); this.invalid = false; this.render(); },
+    headers() { return this.token ? { Authorization: `Bearer ${this.token}` } : {}; },
+    // 浏览器的下载链接与 WebSocket 无法自定义头，仅在读操作受保护时以查询参数携带 token
+    qs(sep = '?') { return this.protectReads && this.token ? `${sep}access_token=${encodeURIComponent(this.token)}` : ''; },
+    render() {
+      const el = $('#auth-btn'); if (!el) return;
+      let cls = '', text;
+      if (!this.required) text = '鉴权：未启用';
+      else if (this.invalid) { cls = 'invalid'; text = '鉴权：token 无效'; }
+      else if (this.token) { cls = 'ok'; text = this.protectReads ? '鉴权：已登录（全部接口）' : '鉴权：已登录（写操作）'; }
+      else { cls = 'missing'; text = '鉴权：需要 token'; }
+      el.className = `auth ${cls}`; $('.auth-text', el).textContent = text;
+    },
+    async prompt(message) {
+      if (this.promptOpen) return false;
+      this.promptOpen = true;
+      try {
+        return await new Promise((resolve) => {
+          const dlg = document.createElement('dialog');
+          dlg.className = 'modal';
+          dlg.innerHTML = `<div class="card-header"><h2>API Token</h2></div>
+            <form class="card-body form" id="auth-form">
+              ${message ? `<div class="alert warn">${esc(message)}</div>` : ''}
+              <div class="small muted">服务器${this.required ? '已启用' : '未启用'} Bearer Token 鉴权${this.required ? (this.protectReads ? '（所有接口与实时连接）' : '（写操作：提交、取消、删除、编辑规范）') : ''}。token 只保存在当前浏览器的 localStorage 中。</div>
+              <label class="field">Token<input type="password" id="auth-input" value="${esc(this.token)}" placeholder="与 --auth-token / TESTHUB_AUTH_TOKEN 一致" autocomplete="off"></label>
+              <div class="flex" style="justify-content:space-between">
+                <button class="btn" data-x="clear" type="button">清除</button>
+                <span class="btn-group"><button class="btn" data-x="cancel" type="button">取消</button><button class="btn primary" data-x="save" type="submit">保存</button></span>
+              </div>
+            </form>`;
+          document.body.appendChild(dlg);
+          const finish = (saved) => { dlg.close(); resolve(saved); };
+          dlg.addEventListener('click', (e) => {
+            const b = e.target.closest('button[data-x]'); if (!b || b.type === 'submit') return;
+            if (b.dataset.x === 'clear') { this.set(''); finish(true); }
+            else finish(false);
+          });
+          $('#auth-form', dlg).addEventListener('submit', (e) => { e.preventDefault(); this.set($('#auth-input', dlg).value.trim()); finish(true); });
+          dlg.addEventListener('close', () => { dlg.remove(); resolve(false); });
+          dlg.showModal();
+          $('#auth-input', dlg).focus();
+        });
+      } finally { this.promptOpen = false; }
+    },
+  };
+
   async function api(path, opts = {}) {
-    const init = { method: opts.method || 'GET', headers: {} };
+    const init = { method: opts.method || 'GET', headers: auth.headers() };
     if (opts.body !== undefined) {
       init.headers['Content-Type'] = 'application/json';
       init.body = typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body);
@@ -59,6 +111,12 @@
     if (!res.ok) {
       const err = new Error((data && (data.error || data.message)) || `HTTP ${res.status}`);
       err.status = res.status; err.data = data;
+      if (res.status === 401) {
+        auth.required = true;
+        auth.invalid = !!auth.token;
+        auth.render();
+        auth.prompt(auth.token ? 'token 被服务器拒绝，请重新输入。' : '该操作需要 API Token。').then((saved) => { if (saved) { if (auth.protectReads) live.reconnect(); navigate(); } });
+      }
       throw err;
     }
     return data;
@@ -93,13 +151,15 @@
     ws: null, listeners: new Set(), retry: 0, recent: [], maxRecent: 400,
     connect() {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(`${proto}://${location.host}/ws/v1/events`);
+      const ws = new WebSocket(`${proto}://${location.host}/ws/v1/events${auth.qs()}`);
       this.ws = ws;
       ws.onopen = () => { this.retry = 0; setConn('online', '实时连接已建立'); };
       ws.onclose = () => {
-        setConn('offline', '实时连接断开，重连中…');
+        if (this.ws !== ws) return;  // 已被 reconnect() 替换
+        const needToken = auth.protectReads && !auth.token;
+        setConn('offline', needToken ? '实时连接需要 API Token' : '实时连接断开，重连中…');
         const delay = Math.min(15000, 500 * Math.pow(2, this.retry++));
-        setTimeout(() => this.connect(), delay);
+        this.timer = setTimeout(() => this.connect(), needToken ? 15000 : delay);
       };
       ws.onerror = () => ws.close();
       ws.onmessage = (m) => {
@@ -111,6 +171,12 @@
       };
     },
     on(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); },
+    reconnect() {
+      clearTimeout(this.timer); this.retry = 0;
+      const old = this.ws; this.ws = null;
+      if (old) { try { old.close(); } catch {} }
+      this.connect();
+    },
   };
   function setConn(cls, text) {
     const el = $('#conn-indicator');
@@ -438,7 +504,7 @@
       main.innerHTML = `
         ${header(`<span class="mono">${esc(id)}</span> ${pill(status.state)}`, req.name ? esc(req.name) : '', `
           ${active ? `<button class="btn danger" data-act="cancel" data-id="${esc(id)}">取消</button>` : `<button class="btn" data-act="rerun" data-id="${esc(id)}">重跑</button>${status.state === 'failed' ? `<button class="btn" data-act="rerun-failed" data-id="${esc(id)}">仅重跑失败</button>` : ''}<button class="btn danger" data-act="delete" data-id="${esc(id)}">删除</button>`}
-          ${result ? `<a class="btn" href="/api/v1/tests/${encodeURIComponent(id)}/report?format=html" target="_blank" rel="noopener" title="在新标签页打开 HTML 报告">HTML 报告</a><a class="btn" href="/api/v1/tests/${encodeURIComponent(id)}/report?format=junit&amp;download=1" title="下载 JUnit XML">JUnit XML</a>` : ''}
+          ${result ? `<a class="btn" href="/api/v1/tests/${encodeURIComponent(id)}/report?format=html${auth.qs('&amp;')}" target="_blank" rel="noopener" title="在新标签页打开 HTML 报告">HTML 报告</a><a class="btn" href="/api/v1/tests/${encodeURIComponent(id)}/report?format=junit&amp;download=1${auth.qs('&amp;')}" title="下载 JUnit XML">JUnit XML</a>` : ''}
           <a class="btn" href="#/tests">← 列表</a>`)}
         <div class="grid grid-main">
           <div class="grid" style="align-content:start">
@@ -787,7 +853,13 @@
   // ------------------------------------------------------------
   // 启动
   // ------------------------------------------------------------
-  live.connect();
-  api('/health').then((h) => { $('#brand-version').textContent = 'v' + h.version; }).catch(() => {});
-  navigate();
+  $('#auth-btn').addEventListener('click', () => auth.prompt().then((saved) => { if (saved) { if (auth.protectReads) live.reconnect(); navigate(); } }));
+  auth.render();
+  api('/health').then((h) => {
+    $('#brand-version').textContent = 'v' + h.version;
+    auth.required = !!h.auth_required; auth.protectReads = !!h.auth_protect_reads;
+    auth.render();
+    if (auth.required && !auth.token) toast(auth.protectReads ? '服务器要求 API Token，请点击左下角"鉴权"设置' : '服务器已启用鉴权：提交/取消/删除等写操作需要 API Token', 'info', 6000);
+    live.connect(); navigate();
+  }).catch(() => { live.connect(); navigate(); });
 })();

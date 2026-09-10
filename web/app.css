@@ -116,6 +116,12 @@ h3 { font-size: 14px; }
 .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
 .conn.online .conn-dot { background: var(--pass); box-shadow: 0 0 0 3px color-mix(in srgb, var(--pass) 25%, transparent); }
 .conn.offline .conn-dot { background: var(--fail); }
+.auth { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); background: none; border: 0; padding: 0; cursor: pointer; font-family: inherit; text-align: left; }
+.auth:hover .auth-text { color: var(--text); text-decoration: underline; }
+.auth-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex: none; }
+.auth.ok .auth-dot { background: var(--pass); }
+.auth.missing .auth-dot { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 25%, transparent); }
+.auth.invalid .auth-dot { background: var(--fail); }
 
 .main { padding: 26px 30px 40px; min-width: 0; }
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
