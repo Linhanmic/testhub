@@ -244,7 +244,8 @@ private:
     void acceptLoop();
     void workerLoop();
     void handleConnection(socket_t client, const std::string& remote);
-    bool readRequest(socket_t client, HttpRequest& request, int& errorCode, std::string& errorMessage, int firstByteTimeoutMs);
+    bool readRequest(socket_t client, HttpRequest& request, std::string& buffer, int& errorCode,
+                     std::string& errorMessage, int firstByteTimeoutMs);
     bool matchRoute(const HttpRequest& request, RequestHandler& handler, std::map<std::string, std::string>& params, bool& methodMismatch) const;
     HttpResponse serveStatic(const HttpRequest& request, bool& found) const;
     static bool sendAll(socket_t s, const std::string& data);

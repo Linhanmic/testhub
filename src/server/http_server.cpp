@@ -95,6 +95,7 @@ const char* HttpResponse::reasonPhrase(int code) {
         case 409: return "Conflict";
         case 413: return "Payload Too Large";
         case 415: return "Unsupported Media Type";
+        case 418: return "I'm a teapot";
         case 422: return "Unprocessable Entity";
         case 426: return "Upgrade Required";
         case 429: return "Too Many Requests";
@@ -102,6 +103,7 @@ const char* HttpResponse::reasonPhrase(int code) {
         case 500: return "Internal Server Error";
         case 501: return "Not Implemented";
         case 503: return "Service Unavailable";
+        case 504: return "Gateway Timeout";
         default: return "Unknown";
     }
 }
@@ -368,12 +370,11 @@ bool HttpServer::parseRequestHead(const std::string& head, HttpRequest& request,
     return true;
 }
 
-bool HttpServer::readRequest(socket_t client, HttpRequest& request, int& errorCode, std::string& errorMessage,
-                             int firstByteTimeoutMs) {
-    std::string buffer;
+bool HttpServer::readRequest(socket_t client, HttpRequest& request, std::string& buffer, int& errorCode,
+                             std::string& errorMessage, int firstByteTimeoutMs) {
     char chunk[8192];
-    size_t headerEnd = std::string::npos;
-    bool firstByte = true;
+    size_t headerEnd = buffer.find("\r\n\r\n");
+    bool firstByte = buffer.empty();
 
     while (headerEnd == std::string::npos) {
         int timeout = firstByte ? firstByteTimeoutMs : config_.readTimeoutMs;
@@ -404,6 +405,7 @@ bool HttpServer::readRequest(socket_t client, HttpRequest& request, int& errorCo
 
     std::string head = buffer.substr(0, headerEnd + 2);
     std::string rest = buffer.substr(headerEnd + 4);
+    buffer.clear();
     std::string parseError;
     if (!parseRequestHead(head, request, parseError)) {
         errorCode = 400;
@@ -457,7 +459,11 @@ bool HttpServer::readRequest(socket_t client, HttpRequest& request, int& errorCo
         }
         request.body.append(chunk, static_cast<size_t>(n));
     }
-    if (request.body.size() > contentLength) request.body.resize(contentLength);
+    if (request.body.size() > contentLength) {
+        // 管线化：多余的字节属于下一个请求
+        buffer = request.body.substr(contentLength);
+        request.body.resize(contentLength);
+    }
     return true;
 }
 
@@ -493,6 +499,7 @@ void HttpServer::handleConnection(socket_t client, const std::string& remote) {
     setsockopt(client, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&opt), sizeof(opt));
 
     bool first = true;
+    std::string leftover;  // 上一个请求之后已读到的字节（HTTP 管线化）
     while (!stopping_) {
         HttpRequest request;
         request.remoteAddress = remote;
@@ -500,7 +507,7 @@ void HttpServer::handleConnection(socket_t client, const std::string& remote) {
         std::string errorMessage;
         int firstTimeout = first ? config_.readTimeoutMs : config_.keepAliveTimeoutMs;
         first = false;
-        if (!readRequest(client, request, errorCode, errorMessage, firstTimeout)) {
+        if (!readRequest(client, request, leftover, errorCode, errorMessage, firstTimeout)) {
             if (errorCode != 0) {
                 HttpResponse err = HttpResponse::error(errorCode, errorMessage);
                 sendAll(client, serialize(err, false));
@@ -703,7 +710,14 @@ HttpResponse HttpServer::dispatch(const HttpRequest& input) {
             RequestHandler handler;
             std::map<std::string, std::string> params;
             bool methodMismatch = false;
-            if (matchRoute(request, handler, params, methodMismatch)) {
+            bool matched = matchRoute(request, handler, params, methodMismatch);
+            if (!matched && request.method == "HEAD") {
+                // HEAD 复用 GET 处理器（响应体在末尾被清空）
+                HttpRequest asGet = request;
+                asGet.method = "GET";
+                matched = matchRoute(asGet, handler, params, methodMismatch);
+            }
+            if (matched) {
                 request.pathParams = params;
                 response = handler(request);
             } else if (methodMismatch) {

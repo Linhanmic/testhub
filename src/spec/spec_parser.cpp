@@ -579,6 +579,8 @@ ParseResult SpecParser::parse(const std::string& content, const std::string& fil
 
     if (section == Section::BeforeHeading) {
         error(0, "Specification heading not found", "");
+    } else if (specification->scenarios.empty()) {
+        warning(specification->headingLine, "Specification has no scenarios: " + specification->heading, "");
     }
     for (const auto& scenario : specification->scenarios) {
         if (scenario.steps.empty()) {

@@ -106,6 +106,25 @@ public:
         if (!isArray() || index >= array_->size()) return nullValue;
         return (*array_)[index];
     }
+    // 整型字面量索引：避免 j[0] 被解析为 operator[](const char*) 而构造空指针字符串
+    const Json& operator[](int index) const {
+        static const Json nullValue;
+        if (index < 0) return nullValue;
+        return (*this)[static_cast<size_t>(index)];
+    }
+    Json& operator[](size_t index) {
+        if (!isArray()) {
+            type_ = Type::Array;
+            array_ = std::make_shared<Array>();
+        }
+        detachArray();
+        if (index >= array_->size()) array_->resize(index + 1);
+        return (*array_)[index];
+    }
+    Json& operator[](int index) {
+        if (index < 0) throw std::out_of_range("Negative JSON array index");
+        return (*this)[static_cast<size_t>(index)];
+    }
 
     const Json& get(const std::string& key) const { return (*this)[key]; }
 
