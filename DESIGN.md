@@ -11,7 +11,7 @@ TestHub 是一个常驻内存的自动化测试守护进程。它接收 HTTP 请
 | 目标 | 落地方式 |
 |------|----------|
 | 零第三方依赖、单一可执行文件 | 自带 JSON、HTTP/1.1、WebSocket、SHA-1、Base64、规范解析器；Web 资源在构建期内嵌 |
-| 长运行、可观测 | 常驻队列 + 结果历史；事件总线 + WebSocket；健康/状态端点；结构化日志 |
+| 长运行、可观测 | 常驻队列 + 结果历史（JSON 落盘，重启回放）；事件总线 + WebSocket；健康/状态端点；结构化日志 |
 | 语言无关的步骤实现 | Runner 以子进程运行，通过 stdin/stdout JSON-lines 通信；任何语言均可实现 |
 | 可预测的并发 | 测试级并发由 worker 数控制；有状态 Runner 以场景为粒度独占 |
 | 可测试 | 全部核心模块可在进程内实例化（端口 0、mock Runner），单元/集成测试无外部依赖 |
@@ -26,7 +26,7 @@ TestHub 复用 Gauge 的规范语法（`.spec` / `.cpt`），便于迁移已有�
 | 触发方式 | CLI | HTTP API / Web UI |
 | 结果获取 | 控制台 / 报告文件 | REST 查询 + WebSocket 推送 + Web UI |
 | Runner 协议 | gRPC + Protobuf | JSON-lines over stdio |
-| 状态 | 无状态 | 内存中维护队列、进度、历史 |
+| 状态 | 无状态 | 内存中维护队列与进度；结果持久化到磁盘 |
 
 ## 2. 系统架构
 
@@ -40,7 +40,8 @@ TestHub 复用 Gauge 的规范语法（`.spec` / `.cpt`），便于迁移已有�
                  │    ├─ TestQueue (优先级 + FIFO)                 │              │
                  │    ├─ worker 线程 ×N ── executeTest/Spec/Scenario/Step ─────────┤
                  │    ├─ SpecRepository ── SpecParser / ConceptDictionary          │
-                 │    └─ records_ (状态 + 结果历史，环形上限)                        │
+                 │    ├─ records_ (状态 + 结果历史，环形上限)                        │
+                 │    └─ ResultStore (data/results/<id>.json，启动时回放)             │
                  │                                                                │
                  │  RunnerBridge (会话锁、心跳、自动重启、步骤缓存)                    │
                  │    ├─ MockRunner  (进程内，所有步骤通过，可配置延迟)               │
@@ -112,6 +113,8 @@ worker 线程
 - **fail_fast**：首个失败场景后跳过其余场景。
 - **重跑**：`rerun(id, failed_only)` 复制原请求；`failed_only` 时把失败场景名写入 `scenarios` 过滤。
 - **历史**：`records_` 保留最近 `execution.history_limit` 条已完成记录；`DELETE /tests` 清空。
+- **持久化**：`ResultStore`（`src/engine/result_store.*`）在测试进入终态时把 `{request, status, result, resolved_specs}` 写入 `<results_dir>/<test_id>.json`（临时文件 + rename 原子替换）；`start()` 时回放目录中的记录到 `records_` 与统计，并按 `history_limit` 裁剪；删除/清空历史同步删除文件；损坏文件跳过并告警。`results_dir` 为空则仅保存在内存。
+- **零匹配**：没有任何场景被执行的测试状态为 `skipped` 并附带警告，而不是 `passed`。
 - **进度**：`progress = (executed + skipped) / total`，`executed_scenarios` 只统计真正运行过的场景。
 
 ### 3.4 SpecParser / SpecRepository（`src/spec/`）
@@ -305,7 +308,7 @@ JSON 文件（`--config`），键与 `--print-config` 输出一致：
   "runner":    {"language":"python","command":"","project_path":"runners/python",
                 "connection_timeout":15000,"request_timeout":60000,"auto_restart":true,"max_restarts":5,"mock_delay_ms":0},
   "execution": {"max_concurrent_tests":1,"default_timeout":300000,"step_timeout":60000,"history_limit":200,
-                "environment":{"BASE_URL":"http://localhost:3000"}},
+                "results_dir":"data/results","environment":{"BASE_URL":"http://localhost:3000"}},
   "specs":     {"dir":"specs","concepts_dir":""},
   "logging":   {"level":"info","file":"","requests":true}
 }
@@ -320,7 +323,7 @@ src/
   main.cpp                 CLI、配置合并、daemonize、信号
   testhub.{h,cpp}          TestHubConfig + TestHub 门面
   server/                  http_server, websocket_server, api_routes, web_ui, web_assets.h
-  engine/                  execution_engine, test_queue, tag_filter
+  engine/                  execution_engine, result_store, test_queue, tag_filter
   runner/                  runner, mock_runner, process_runner, runner_bridge
   spec/                    spec, spec_parser, spec_repository
   event/                   event_bus
@@ -336,14 +339,14 @@ cmake/EmbedResources.cmake
 
 ## 8. 质量保障
 
-- **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话）。
-- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消。
+- **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）。
+- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放。
 - **协议测试**（`python_runner_protocol`）：以子进程启动 Python Runner，验证 ping/get_steps/execute_step/hook/kill 与错误路径。
 - **CI**：Ubuntu（g++、clang++）与 macOS，`-Wall -Wextra -Wpedantic -Werror`，`ctest`，二进制冒烟（curl）。
 
 ## 9. 已知限制与演进方向
 
-- 结果与历史仅保存在内存中，重启即丢失（计划：JSON/SQLite 持久化）。
+- 结果以单文件 JSON 持久化，适合中小规模历史；海量历史或跨实例查询需要 SQLite/数据库后端。
 - 同一时刻只有一个 Runner 进程；`max_concurrent_tests > 1` 时通过场景级会话锁串行化步骤执行，真正并行需要 Runner 池。
 - `callback_url` 已在请求模型中接受但尚未回调。
 - 无鉴权；建议在受信网络内部署或置于反向代理之后（计划：Bearer Token）。

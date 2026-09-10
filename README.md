@@ -13,6 +13,7 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 | 运行模式 | 守护进程常驻；`--daemon`、PID 文件、JSON 配置文件、CLI 覆盖 |
 | 规范 | `# 规范` / `## 场景` / `* 步骤`、`tags:`、规范级数据表（数据驱动）、上下文步骤、`___` 清理步骤、概念（`.cpt`）展开、`"静态"` / `<动态>` / `<file:>` / `<table:>` 参数、内联表格 |
 | 执行引擎 | 优先级队列、标签过滤表达式（`smoke & !slow`）、场景名过滤、fail_fast、测试/步骤超时、取消、`failed_only` 重跑、结果历史 |
+| 持久化 | 已完成的测试以 JSON 落盘（默认 `data/results/`），重启后自动回放历史与统计 |
 | Runner | 跨平台子进程桥接 + JSON-lines 协议；内置 mock Runner；Python 参考 Runner（装饰器式步骤实现、钩子、数据表、消息）；自动重启；并发测试时场景级独占会话 |
 | 服务端 | 多线程 HTTP/1.1（keep-alive、流水线、Content-Length、超时、`{param}` 路由、CORS、HEAD/OPTIONS、ETag 静态资源、SPA 回退） |
 | 实时性 | 异步事件总线；`/ws/v1/events` WebSocket 推送（按类型/测试 ID 订阅、历史回放） |
@@ -140,6 +141,8 @@ WebSocket 连接后发送 `{"action":"subscribe","events":["test.*","scenario.*"
 -c, --config <file>        JSON 配置文件
 -j, --concurrency <n>      并发执行的测试数（默认 1）
     --timeout <ms>         测试默认超时
+    --results-dir <path>   结果持久化目录（默认 data/results）
+    --no-persist           不持久化结果，仅保存在内存
     --log-level <level>    debug | info | warn | error | off
     --log-file <file>      日志文件
     --no-ui                不提供 Web UI

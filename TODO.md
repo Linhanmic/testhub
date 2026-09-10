@@ -5,7 +5,7 @@
 ## 当前状态（v1.1.0）
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
-- 65 个自动化测试全部通过（51 单元 + 7 集成 + 7 Python 协议），GitHub Actions 三平台 CI
+- 68 个自动化测试全部通过（53 单元 + 8 集成 + 7 Python 协议），GitHub Actions 三平台 CI
 - 约 12k 行（含前端、Python Runner、测试）
 
 ## 路线图
@@ -23,10 +23,10 @@
 - [x] 内嵌 Web UI（总览、提交、测试记录、结果树、实时执行树、规范浏览/编辑/校验、Runner、事件流）
 - [x] 测试体系（自带迷你框架、单元 + 集成 + 协议测试、ctest、CI）
 - [x] 文档同步（README / DESIGN / QUICKSTART / TODO）
+- [x] 结果持久化：终态记录 JSON 落盘（`data/results/`），启动回放历史与统计，随 history_limit 裁剪
 
 ### P1 — 下一步（按优先级）
 
-- [ ] **结果持久化**：把已完成的 `TestResult` 以 JSON 写入 `data/results/`，启动时回放历史；可选 SQLite
 - [ ] **报表导出**：`GET /tests/{id}/report?format=junit|html`，供 CI 收集
 - [ ] **回调通知**：实现 `callback_url`（测试完成后 POST 结果摘要，带重试）
 - [ ] **鉴权**：`server.auth_token`，Bearer Token 校验写操作；UI 支持输入 token
@@ -88,7 +88,7 @@
 - 自带 `tests/test_framework.h`，51 个单元测试、7 个集成测试、ctest、GitHub Actions
 - 测试暴露并修复：HEAD 返回 405、HTTP 流水线丢失第二个请求、`Json::operator[](int)` 对可变对象解析到 `const char*` 重载、解析器缺少"无场景"警告、`executedScenarios` 把跳过场景计入、`CHECK_EQ` 悬垂引用
 
-### 迭代 7 — 浏览器实测与 UI 完善（本轮）
+### 迭代 7 — 浏览器实测与 UI 完善
 
 - 用 Playwright 逐页实测：总览、提交表单、测试记录、详情、规范结构/源码/编辑、Runner、事件流
 - 新增：运行中根据事件流构建实时执行树（规范 → 场景 → 步骤，含概念嵌套与运行中标记）；结果树用数据行替换 `<列>` 并悬浮显示原名；规范页标出 Runner 未实现的步骤并给出提示
@@ -97,6 +97,14 @@
 - Runner：新增通用 `等待 <seconds> 秒` 步骤与 `specs/slow.spec`，用于演示实时监控、超时与取消
 - 测试框架：`--filter` / `--list` 选项
 - 文档：README / DESIGN / QUICKSTART / TODO 全部按实现重写
+
+### 迭代 8 — 结果持久化
+
+- 新增 `ResultStore`：终态记录写入 `<results_dir>/<test_id>.json`（tmp + rename），`start()` 回放到内存与统计，删除/清空/裁剪同步删文件，损坏文件跳过
+- `json_convert.h` 补齐 `TestStatus` / `TestResult` 及嵌套结构的反序列化；`TimeUtil::fromIso8601`
+- 配置 `execution.results_dir`（默认 `data/results`），CLI `--results-dir` / `--no-persist`；`.gitignore` 忽略 `data/`
+- 修复：过滤后没有任何场景匹配的测试之前被标为 `passed`，现在为 `skipped` 并附警告（编写集成测试时用错标签暴露了此问题）
+- 测试：ResultStore JSON 往返 + 引擎重启回放/裁剪单测；集成测试模拟服务器重启后列表、状态、结果、统计、重跑、删除文件
 
 ---
 
@@ -110,6 +118,7 @@
 | 迭代 5 | 并发粒度定为"场景"而非"步骤"或"测试" | 步骤级会让有状态 Runner 交错；测试级会让并发形同虚设；场景级兼顾正确性与吞吐 |
 | 迭代 6 | 自写迷你测试框架而非引入 Catch2/GTest | 保持零依赖；需求简单（TEST_CASE/CHECK/REQUIRE 足够） |
 | 迭代 7 | 运行中视图由事件流在前端构建，而非服务端提供部分结果 | 复用既有事件，无需新增 API；结果落地后以服务端结果树为准 |
+| 迭代 8 | 持久化采用“一测试一 JSON 文件”而非 SQLite | 零依赖、可直接用文本工具查看/备份、与 API 输出同构；查询需求复杂时再引入数据库 |
 
 ---
 
@@ -118,7 +127,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 65 个，全部通过；`ctest` 约 1.4 s |
+| 自动化测试 | 68 个，全部通过；`ctest` 约 1.4 s |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
 | 代码规模 | 约 12k 行（C++ 约 8.8k，前端约 1.1k，Python 约 0.7k，测试约 1.7k） |
