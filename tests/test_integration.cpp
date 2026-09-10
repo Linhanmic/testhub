@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -126,11 +127,11 @@ bool readHttpResponse(TcpClient& c, HttpResult& out, int timeoutMs = 5000) {
 }
 
 HttpResult request(int port, const std::string& method, const std::string& path, const std::string& body = "",
-                   const std::string& contentType = "application/json") {
+                   const std::string& contentType = "application/json", const std::string& extraHeaders = "") {
     HttpResult r;
     TcpClient c(port);
     if (!c.ok()) return r;
-    std::string req = method + " " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n";
+    std::string req = method + " " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n" + extraHeaders;
     if (!body.empty()) req += "Content-Type: " + contentType + "\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
     req += "\r\n" + body;
     c.sendAll(req);
@@ -218,8 +219,8 @@ struct Server {
     TestHub hub;
     int port = 0;
 
-    // resultsDir 为空时使用新的临时目录；传入已有目录可模拟重启后回放历史
-    explicit Server(const std::string& existingResultsDir = "") {
+    // resultsDir 为空时使用新的临时目录；传入已有目录可模拟重启后回放历史；tweak 可在启动前调整配置
+    explicit Server(const std::string& existingResultsDir = "", const std::function<void(TestHubConfig&)>& tweak = nullptr) {
         specsDir = makeTempDir("testhub-it-");
         fs::create_directories(specsDir + "/concepts");
         for (const auto& name : {"login.spec", "calculator.spec", "checkout.spec"}) {
@@ -241,6 +242,7 @@ struct Server {
         cfg.maxConcurrentTests = 2;
         cfg.callbackRetryBackoffMs = 30;
         cfg.callbackTimeoutMs = 2000;
+        if (tweak) tweak(cfg);
         if (!hub.initialize(cfg) || !hub.start()) throw std::runtime_error("failed to start TestHub");
         port = hub.boundPort();
     }
@@ -628,6 +630,58 @@ TEST_CASE("integration: callback gives up after max attempts and reports failure
     Json status = request(s.port, "GET", "/api/v1/status").json();
     CHECK_EQ(status["callbacks"]["failed"].asInt(), 1);
     CHECK_EQ(status["callbacks"]["pending"].asInt(), 0);
+}
+
+TEST_CASE("integration: bearer token protects write operations") {
+    Server s("", [](TestHubConfig& cfg) { cfg.authToken = "top-secret"; });
+    const std::string good = "Authorization: Bearer top-secret\r\n";
+
+    Json health = request(s.port, "GET", "/api/v1/health").json();
+    CHECK(health["auth_required"].asBool());
+    CHECK(!health["auth_protect_reads"].asBool());
+    CHECK_EQ(request(s.port, "GET", "/api/v1/tests").status, 200);               // 读操作放行
+    CHECK_EQ(request(s.port, "GET", "/").status, 200);                           // UI 放行
+    Json cfg = request(s.port, "GET", "/api/v1/config").json();
+    CHECK_EQ(cfg["server"]["auth_token"].asString(), std::string("***"));      // 不泄露 token
+
+    HttpResult denied = request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["login.spec"]})");
+    CHECK_EQ(denied.status, 401);
+    CHECK_EQ(denied.headers["www-authenticate"], std::string("Bearer realm=\"TestHub\""));
+    CHECK_EQ(request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["login.spec"]})", "application/json",
+                     "Authorization: Bearer nope\r\n").status, 401);
+    CHECK_EQ(request(s.port, "DELETE", "/api/v1/tests").status, 401);
+    CHECK_EQ(request(s.port, "PUT", "/api/v1/specs/x.spec", "# X\n## S\n* a\n", "text/plain").status, 401);
+    // 预检不受影响
+    CHECK_EQ(request(s.port, "OPTIONS", "/api/v1/tests").status, 204);
+
+    HttpResult ok = request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["login.spec"]})", "application/json", good);
+    REQUIRE_EQ(ok.status, 202);
+    std::string id = ok.json()["test_id"].asString();
+    CHECK_EQ(s.waitForTerminal(id)["state"].asString(), std::string("passed"));
+    CHECK_EQ(request(s.port, "DELETE", "/api/v1/tests/" + id, "", "application/json", "X-Auth-Token: top-secret\r\n").status, 200);
+
+    WsClient ws(s.port);
+    CHECK(ws.upgraded);                                                          // 未保护读操作时 WS 放行
+}
+
+TEST_CASE("integration: bearer token can also protect reads and websocket") {
+    Server s("", [](TestHubConfig& cfg) { cfg.authToken = "t0k3n"; cfg.authProtectReads = true; });
+    CHECK_EQ(request(s.port, "GET", "/api/v1/health").status, 200);
+    CHECK_EQ(request(s.port, "GET", "/").status, 200);
+    CHECK_EQ(request(s.port, "GET", "/app.js").status, 200);
+    CHECK_EQ(request(s.port, "GET", "/api/v1/tests").status, 401);
+    CHECK_EQ(request(s.port, "GET", "/api/v1/tests", "", "application/json", "Authorization: Bearer t0k3n\r\n").status, 200);
+    CHECK_EQ(request(s.port, "GET", "/api/v1/tests?access_token=t0k3n").status, 200);   // 下载链接形式
+    CHECK_EQ(request(s.port, "GET", "/api/v1/tests?access_token=wrong").status, 401);
+    CHECK_EQ(request(s.port, "HEAD", "/api/v1/tests").status, 401);
+
+    WsClient refused(s.port);
+    CHECK(!refused.upgraded);
+    WsClient accepted(s.port, "/ws/v1/events?access_token=t0k3n");
+    REQUIRE(accepted.upgraded);
+    std::string welcome;
+    REQUIRE(accepted.readText(welcome, 3000));
+    CHECK(welcome.find("\"welcome\"") != std::string::npos);
 }
 
 TEST_CASE("integration: results persist across server restarts") {

@@ -138,3 +138,78 @@ TEST_CASE("http: response serialization") {
     CHECK_EQ(HttpServer::mimeTypeFor("x/y.CSS"), std::string("text/css; charset=utf-8"));
     CHECK_EQ(HttpServer::mimeTypeFor("noext"), std::string("application/octet-stream"));
 }
+
+#include "server/auth.h"
+
+TEST_CASE("auth: policy decides which requests need a token and where it may come from") {
+    AuthPolicy off;
+    HttpResponse denied;
+    CHECK(!off.enabled());
+    CHECK(off.authorize(makeRequest("DELETE", "/api/v1/tests"), denied));
+
+    AuthPolicy writes(AuthConfig{"s3cret", false});
+    CHECK(writes.authorize(makeRequest("GET", "/api/v1/tests"), denied));          // 读操作放行
+    CHECK(writes.authorize(makeRequest("GET", "/"), denied));                      // 静态 UI 放行
+    CHECK(writes.authorize(makeRequest("OPTIONS", "/api/v1/tests"), denied));      // 预检放行
+    HttpRequest post = makeRequest("POST", "/api/v1/tests");
+    CHECK(!writes.authorize(post, denied));
+    CHECK_EQ(denied.statusCode, 401);
+    CHECK_EQ(denied.headers["WWW-Authenticate"], std::string("Bearer realm=\"TestHub\""));
+    CHECK(denied.body.find("Authentication required") != std::string::npos);
+    post.headers["authorization"] = "Bearer wrong";
+    CHECK(!writes.authorize(post, denied));
+    CHECK(denied.body.find("Invalid token") != std::string::npos);
+    post.headers["authorization"] = "bearer s3cret";  // scheme 不区分大小写
+    CHECK(writes.authorize(post, denied));
+    post.headers.erase("authorization");
+    post.headers["x-auth-token"] = "s3cret";
+    CHECK(writes.authorize(post, denied));
+    post.headers.erase("x-auth-token");
+    post.queryParams["access_token"] = "s3cret";       // 写操作不接受查询参数
+    CHECK(!writes.authorize(post, denied));
+
+    AuthPolicy all(AuthConfig{"s3cret", true});
+    CHECK(all.authorize(makeRequest("GET", "/api/v1/health"), denied));           // 健康检查始终放行
+    CHECK(all.authorize(makeRequest("GET", "/app.js"), denied));
+    CHECK(!all.authorize(makeRequest("GET", "/api/v1/tests"), denied));
+    HttpRequest get = makeRequest("GET", "/api/v1/tests/x/report");
+    get.queryParams["access_token"] = "s3cret";
+    CHECK(all.authorize(get, denied));                                            // 下载链接可用查询参数
+    HttpRequest ws = makeRequest("GET", "/ws/v1/events");
+    ws.headers["upgrade"] = "websocket";
+    CHECK(!all.authorize(ws, denied));
+    ws.queryParams["access_token"] = "s3cret";
+    CHECK(all.authorize(ws, denied));
+    HttpRequest head = makeRequest("HEAD", "/api/v1/tests");
+    CHECK(!all.authorize(head, denied));
+
+    CHECK(AuthPolicy::constantTimeEquals("abc", "abc"));
+    CHECK(!AuthPolicy::constantTimeEquals("abc", "abd"));
+    CHECK(!AuthPolicy::constantTimeEquals("abc", "abcd"));
+    CHECK(!AuthPolicy::constantTimeEquals("", "a"));
+}
+
+TEST_CASE("http: request filter runs before routing and can be removed") {
+    HttpServerConfig cfg;
+    cfg.logRequests = false;
+    HttpServer server(cfg);
+    server.get("/api/v1/x", [](const HttpRequest&) { return HttpResponse::text(200, "x"); });
+    int calls = 0;
+    server.setRequestFilter([&](const HttpRequest& req, HttpResponse& denied) {
+        calls++;
+        if (req.header("x-ok") == "1") return true;
+        denied = HttpResponse::error(401, "nope");
+        return false;
+    });
+    HttpResponse r = server.dispatch(makeRequest("GET", "/api/v1/x"));
+    CHECK_EQ(r.statusCode, 401);
+    CHECK_EQ(r.headers["Access-Control-Allow-Origin"], std::string("*"));
+    HttpRequest ok = makeRequest("GET", "/api/v1/x");
+    ok.headers["x-ok"] = "1";
+    CHECK_EQ(server.dispatch(ok).body, std::string("x"));
+    // OPTIONS 预检不经过过滤器
+    CHECK_EQ(server.dispatch(makeRequest("OPTIONS", "/api/v1/x")).statusCode, 204);
+    CHECK_EQ(calls, 2);
+    server.setRequestFilter(nullptr);
+    CHECK_EQ(server.dispatch(makeRequest("GET", "/api/v1/x")).statusCode, 200);
+}
