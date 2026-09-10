@@ -79,7 +79,7 @@ TestHub 复用 Gauge 的规范语法（`.spec` / `.cpt`），便于迁移已有�
 
 - 成功响应为 JSON 对象；错误统一为 `{"error": "...", "status": <code>}`。
 - 提交测试返回 `202 Accepted` + `Location: /api/v1/tests/{id}`。
-- 结果未就绪时 `GET /tests/{id}/result` 返回 202；取消已结束测试返回 409。
+- 结果未就绪时 `GET /tests/{id}/result` 返回 202，`GET /tests/{id}/report` 返回 409；取消已结束测试返回 409。
 - `spec_files` 为相对规范目录的路径，可为目录；空数组表示全部规范。
 - 规范写接口拒绝 `..` 与非 `.spec/.md/.cpt` 扩展名。
 
@@ -115,6 +115,7 @@ worker 线程
 - **历史**：`records_` 保留最近 `execution.history_limit` 条已完成记录；`DELETE /tests` 清空。
 - **持久化**：`ResultStore`（`src/engine/result_store.*`）在测试进入终态时把 `{request, status, result, resolved_specs}` 写入 `<results_dir>/<test_id>.json`（临时文件 + rename 原子替换）；`start()` 时回放目录中的记录到 `records_` 与统计，并按 `history_limit` 裁剪；删除/清空历史同步删除文件；损坏文件跳过并告警。`results_dir` 为空则仅保存在内存。
 - **零匹配**：没有任何场景被执行的测试状态为 `skipped` 并附带警告，而不是 `passed`。
+- **报表**：`ReportWriter`（`src/report/report_writer.*`）从 `TestRecord` 按需渲染 JUnit XML（规范 → `testsuite`，场景/数据行 → `testcase`，`failure`/`error`/`skipped`，步骤与 Runner 消息进 `system-out`，标签/环境/元数据进 `properties`）或自包含 HTML；不落盘，历史记录回放后同样可导出。
 - **进度**：`progress = (executed + skipped) / total`，`executed_scenarios` 只统计真正运行过的场景。
 
 ### 3.4 SpecParser / SpecRepository（`src/spec/`）
@@ -324,6 +325,7 @@ src/
   testhub.{h,cpp}          TestHubConfig + TestHub 门面
   server/                  http_server, websocket_server, api_routes, web_ui, web_assets.h
   engine/                  execution_engine, result_store, test_queue, tag_filter
+  report/                  report_writer（JUnit XML / HTML）
   runner/                  runner, mock_runner, process_runner, runner_bridge
   spec/                    spec, spec_parser, spec_repository
   event/                   event_bus
@@ -339,7 +341,7 @@ cmake/EmbedResources.cmake
 
 ## 8. 质量保障
 
-- **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）。
+- **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）；报表（JUnit 结构与计数、转义、空结果、HTML 自包含）。
 - **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放。
 - **协议测试**（`python_runner_protocol`）：以子进程启动 Python Runner，验证 ping/get_steps/execute_step/hook/kill 与错误路径。
 - **CI**：Ubuntu（g++、clang++）与 macOS，`-Wall -Wextra -Wpedantic -Werror`，`ctest`，二进制冒烟（curl）。

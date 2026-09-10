@@ -14,11 +14,12 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 | 规范 | `# 规范` / `## 场景` / `* 步骤`、`tags:`、规范级数据表（数据驱动）、上下文步骤、`___` 清理步骤、概念（`.cpt`）展开、`"静态"` / `<动态>` / `<file:>` / `<table:>` 参数、内联表格 |
 | 执行引擎 | 优先级队列、标签过滤表达式（`smoke & !slow`）、场景名过滤、fail_fast、测试/步骤超时、取消、`failed_only` 重跑、结果历史 |
 | 持久化 | 已完成的测试以 JSON 落盘（默认 `data/results/`），重启后自动回放历史与统计 |
+| 报表 | 按需导出 JUnit XML（供 Jenkins / GitLab / GitHub Actions 收集）与自包含 HTML 报告；UI 一键下载 |
 | Runner | 跨平台子进程桥接 + JSON-lines 协议；内置 mock Runner；Python 参考 Runner（装饰器式步骤实现、钩子、数据表、消息）；自动重启；并发测试时场景级独占会话 |
 | 服务端 | 多线程 HTTP/1.1（keep-alive、流水线、Content-Length、超时、`{param}` 路由、CORS、HEAD/OPTIONS、ETag 静态资源、SPA 回退） |
 | 实时性 | 异步事件总线；`/ws/v1/events` WebSocket 推送（按类型/测试 ID 订阅、历史回放） |
 | Web UI | 内嵌单页应用：总览、提交测试、测试记录、结果树、运行中实时执行树、规范浏览/编辑/校验、Runner 状态、事件流、暗色模式 |
-| 质量 | 51 个单元测试 + 7 个 HTTP/WS 集成测试 + 7 个 Python 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`） |
+| 质量 | 58 个单元测试 + 8 个 HTTP/WS 集成测试 + 7 个 Python 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`） |
 
 ## 快速开始
 
@@ -58,9 +59,11 @@ curl -X POST http://localhost:8080/api/v1/tests \
 
 curl http://localhost:8080/api/v1/tests/test-20260910-142940-001          # 状态
 curl http://localhost:8080/api/v1/tests/test-20260910-142940-001/result   # 结果树
+curl -o report.xml  "http://localhost:8080/api/v1/tests/test-20260910-142940-001/report?format=junit"  # JUnit XML
+curl -o report.html "http://localhost:8080/api/v1/tests/test-20260910-142940-001/report?format=html"   # HTML 报告
 ```
 
-`spec_files` 为空数组时表示运行规范目录下的全部规范。
+`spec_files` 为空数组时表示运行规范目录下的全部规范。JUnit XML 可直接交给 Jenkins、GitLab CI（`artifacts:reports:junit`）或 GitHub Actions 的测试报告插件。
 
 ## 编写规范与步骤实现
 
@@ -110,6 +113,7 @@ Runner 启动时会加载 `--dir` 下 `step_impl/` 中的全部 Python 文件。
 | DELETE | `/api/v1/tests` | 清空已完成历史 |
 | GET | `/api/v1/tests/{id}` | 测试状态（含请求与进度） |
 | GET | `/api/v1/tests/{id}/result` | 结果树（未完成返回 202） |
+| GET | `/api/v1/tests/{id}/report?format=junit\|html&download=1` | JUnit XML / HTML 报表（未完成返回 409） |
 | GET | `/api/v1/tests/{id}/events` | 该测试的事件历史 |
 | POST | `/api/v1/tests/{id}/cancel` | 取消（已结束返回 409） |
 | DELETE | `/api/v1/tests/{id}` | 取消或删除记录 |

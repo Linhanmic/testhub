@@ -5,7 +5,7 @@
 ## 当前状态（v1.1.0）
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
-- 68 个自动化测试全部通过（53 单元 + 8 集成 + 7 Python 协议），GitHub Actions 三平台 CI
+- 73 个自动化测试全部通过（58 单元 + 8 集成 + 7 Python 协议），GitHub Actions 三平台 CI
 - 约 12k 行（含前端、Python Runner、测试）
 
 ## 路线图
@@ -24,10 +24,10 @@
 - [x] 测试体系（自带迷你框架、单元 + 集成 + 协议测试、ctest、CI）
 - [x] 文档同步（README / DESIGN / QUICKSTART / TODO）
 - [x] 结果持久化：终态记录 JSON 落盘（`data/results/`），启动回放历史与统计，随 history_limit 裁剪
+- [x] 报表导出：`GET /tests/{id}/report?format=junit|html`，UI 详情页一键下载
 
 ### P1 — 下一步（按优先级）
 
-- [ ] **报表导出**：`GET /tests/{id}/report?format=junit|html`，供 CI 收集
 - [ ] **回调通知**：实现 `callback_url`（测试完成后 POST 结果摘要，带重试）
 - [ ] **鉴权**：`server.auth_token`，Bearer Token 校验写操作；UI 支持输入 token
 - [ ] **Runner 池**：`max_concurrent_tests > 1` 时启动多个 Runner 进程真正并行（当前为场景级串行）
@@ -106,6 +106,13 @@
 - 修复：过滤后没有任何场景匹配的测试之前被标为 `passed`，现在为 `skipped` 并附警告（编写集成测试时用错标签暴露了此问题）
 - 测试：ResultStore JSON 往返 + 引擎重启回放/裁剪单测；集成测试模拟服务器重启后列表、状态、结果、统计、重跑、删除文件
 
+### 迭代 9 — 报表导出
+
+- 新增 `report/report_writer.*`：JUnit XML（每规范一个 `testsuite`，每场景/数据行一个 `testcase`，失败 → `failure`、错误 → `error`、跳过/取消 → `skipped`，步骤列表与 Runner 消息写入 `system-out`，标签/环境/元数据写入 `properties`）与自包含 HTML（内联样式、失败项默认展开、概念嵌套、数据行参数替换）
+- API：`GET /api/v1/tests/{id}/report?format=junit|xml|html[&download=1]`；未完成返回 409，未知格式 400；持久化的历史记录同样可导出
+- UI：详情页新增"HTML 报告"（新标签页打开）与"JUnit XML"（下载）按钮
+- 测试：5 个 ReportWriter 单测（结构、转义、控制字符剔除、空结果、HTML 自包含）；集成测试覆盖两种格式、Content-Disposition、409/400/404；`xmllint` 校验输出
+
 ---
 
 ## 决策记录
@@ -119,6 +126,7 @@
 | 迭代 6 | 自写迷你测试框架而非引入 Catch2/GTest | 保持零依赖；需求简单（TEST_CASE/CHECK/REQUIRE 足够） |
 | 迭代 7 | 运行中视图由事件流在前端构建，而非服务端提供部分结果 | 复用既有事件，无需新增 API；结果落地后以服务端结果树为准 |
 | 迭代 8 | 持久化采用“一测试一 JSON 文件”而非 SQLite | 零依赖、可直接用文本工具查看/备份、与 API 输出同构；查询需求复杂时再引入数据库 |
+| 迭代 9 | 报表按需渲染而非随结果落盘 | 结果 JSON 已是事实来源，报表只是视图；避免多份文件不一致，格式演进无需迁移 |
 
 ---
 
@@ -127,7 +135,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 68 个，全部通过；`ctest` 约 1.4 s |
+| 自动化测试 | 73 个，全部通过；`ctest` 约 1.4 s |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
-| 代码规模 | 约 12k 行（C++ 约 8.8k，前端约 1.1k，Python 约 0.7k，测试约 1.7k） |
+| 代码规模 | 约 12.5k 行（C++ 约 9.3k，前端约 1.1k，Python 约 0.7k，测试约 1.9k） |

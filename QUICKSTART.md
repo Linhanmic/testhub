@@ -70,6 +70,7 @@ src/server/web_ui.cpp      TestHub::registerWebUi() — 内嵌资源或 --web-di
 src/server/websocket_*     RFC 6455 握手/帧编解码，订阅过滤，EventBus 转发
 src/engine/execution_engine.*  提交 → 队列 → worker → 规范/场景/步骤执行 → 结果与事件
 src/engine/result_store.*  结果 JSON 落盘与启动回放
+src/report/report_writer.* JUnit XML / HTML 报表渲染
 src/engine/test_queue.h    优先级队列（priority + 提交时间）
 src/engine/tag_filter.h    标签表达式解析（& | ! 括号）
 src/runner/runner.h        Runner 抽象接口（start/stop/getAllSteps/executeStep/runHook/isConcurrencySafe）
