@@ -435,6 +435,7 @@
       main.innerHTML = `
         ${header(`<span class="mono">${esc(id)}</span> ${pill(status.state)}`, req.name ? esc(req.name) : '', `
           ${active ? `<button class="btn danger" data-act="cancel" data-id="${esc(id)}">取消</button>` : `<button class="btn" data-act="rerun" data-id="${esc(id)}">重跑</button>${status.state === 'failed' ? `<button class="btn" data-act="rerun-failed" data-id="${esc(id)}">仅重跑失败</button>` : ''}<button class="btn danger" data-act="delete" data-id="${esc(id)}">删除</button>`}
+          ${result ? `<a class="btn" href="/api/v1/tests/${encodeURIComponent(id)}/report?format=html" target="_blank" rel="noopener" title="在新标签页打开 HTML 报告">HTML 报告</a><a class="btn" href="/api/v1/tests/${encodeURIComponent(id)}/report?format=junit&amp;download=1" title="下载 JUnit XML">JUnit XML</a>` : ''}
           <a class="btn" href="#/tests">← 列表</a>`)}
         <div class="grid grid-main">
           <div class="grid" style="align-content:start">
