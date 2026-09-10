@@ -190,7 +190,11 @@ bool HttpServer::start() {
 
 void HttpServer::stop() {
     if (!running_) return;
-    stopping_ = true;
+    {
+        // 与工作线程的谓词检查同锁，避免在“检查完谓词、尚未进入 wait”的窗口丢失唤醒
+        std::lock_guard<std::mutex> lock(pendingMutex_);
+        stopping_ = true;
+    }
     running_ = false;
     if (listenSocket_ != TH_INVALID_SOCKET) {
 #ifdef _WIN32

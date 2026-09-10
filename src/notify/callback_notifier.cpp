@@ -51,7 +51,11 @@ void CallbackNotifier::stop() {
     if (!cancelledHandlerId_.empty()) EventBus::getInstance().unsubscribe(cancelledHandlerId_);
     completedHandlerId_.clear();
     cancelledHandlerId_.clear();
-    cv_.notify_all();
+    {
+        // 持锁通知：workerLoop 在锁内检查 running_ 后才 wait，否则可能丢失唤醒导致 join 卡死
+        std::lock_guard<std::mutex> lock(mutex_);
+        cv_.notify_all();
+    }
     if (worker_.joinable()) worker_.join();
     std::lock_guard<std::mutex> lock(mutex_);
     jobs_.clear();
