@@ -15,9 +15,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <thread>
 
 using namespace testhub;
@@ -237,6 +239,8 @@ struct Server {
         cfg.logRequests = false;
         cfg.httpWorkerThreads = 4;
         cfg.maxConcurrentTests = 2;
+        cfg.callbackRetryBackoffMs = 30;
+        cfg.callbackTimeoutMs = 2000;
         if (!hub.initialize(cfg) || !hub.start()) throw std::runtime_error("failed to start TestHub");
         port = hub.boundPort();
     }
@@ -515,6 +519,115 @@ TEST_CASE("integration: cancel a running test via API") {
     CHECK_EQ(queue["size"].asInt(), 0);
     Json runner = request(s.port, "GET", "/api/v1/runner/status").json();
     CHECK_EQ(runner["language"].asString(), std::string("mock"));
+}
+
+TEST_CASE("integration: callback_url receives completion payload with retry") {
+    // 接收端：第一次返回 503 触发重试，之后 200；记录收到的请求
+    struct Received { std::string body; std::map<std::string, std::string> headers; };
+    std::mutex mu;
+    std::vector<Received> received;
+    std::atomic<int> hits{0};
+    HttpServerConfig rc;
+    rc.host = "127.0.0.1";
+    rc.port = 0;
+    rc.workerThreads = 2;
+    rc.logRequests = false;
+    HttpServer receiver(rc);
+    receiver.post("/hook", [&](const HttpRequest& req) {
+        int n = ++hits;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            received.push_back({req.body, req.headers});
+        }
+        if (n == 1) return HttpResponse::error(503, "try again");
+        return HttpResponse::json(200, Json::object());
+    });
+    receiver.post("/never", [&](const HttpRequest&) { return HttpResponse::error(500, "down"); });
+    REQUIRE(receiver.start());
+    std::string hookUrl = "http://127.0.0.1:" + std::to_string(receiver.port()) + "/hook";
+
+    Server s;
+    CHECK_EQ(request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["login.spec"],"callback_url":"ftp://x/y"})").status, 400);
+    CHECK_EQ(request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["login.spec"],"callback_url":"https://x/y"})").status, 400);
+
+    HttpResult submit = request(s.port, "POST", "/api/v1/tests",
+                                R"({"spec_files":["login.spec"],"name":"cb","metadata":{"build":"7"},"callback_url":")" + hookUrl + "\"}");
+    REQUIRE_EQ(submit.status, 202);
+    std::string id = submit.json()["test_id"].asString();
+    CHECK_EQ(s.waitForTerminal(id)["state"].asString(), std::string("passed"));
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (hits < 2 && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    REQUIRE_EQ(hits.load(), 2);
+    // 等待 callback.delivered 事件进入历史
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    Json delivered;
+    while (std::chrono::steady_clock::now() < deadline) {
+        Json evs = request(s.port, "GET", "/api/v1/tests/" + id + "/events").json()["events"];
+        for (size_t i = 0; i < evs.size(); ++i) if (evs[i]["event"].asString() == "callback.delivered") delivered = evs[i];
+        if (!delivered.isNull()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(!delivered.isNull());
+    CHECK_EQ(delivered["data"]["attempts"].asString(), std::string("2"));
+    CHECK_EQ(delivered["data"]["status"].asString(), std::string("200"));
+
+    std::lock_guard<std::mutex> lock(mu);
+    REQUIRE_EQ(received.size(), static_cast<size_t>(2));
+    Json p1 = Json::tryParse(received[0].body);
+    Json p2 = Json::tryParse(received[1].body);
+    CHECK_EQ(p1["attempt"].asInt(), 1);
+    CHECK_EQ(p2["attempt"].asInt(), 2);
+    CHECK_EQ(p2["event"].asString(), std::string("test.completed"));
+    CHECK_EQ(p2["test_id"].asString(), id);
+    CHECK_EQ(p2["name"].asString(), std::string("cb"));
+    CHECK_EQ(p2["state"].asString(), std::string("passed"));
+    CHECK_EQ(p2["total_scenarios"].asInt(), 3);
+    CHECK_EQ(p2["passed_scenarios"].asInt(), 3);
+    CHECK_EQ(p2["metadata"]["build"].asString(), std::string("7"));
+    CHECK_EQ(p2["failed_scenarios_detail"].size(), static_cast<size_t>(0));
+    CHECK_EQ(p2["links"]["report_junit"].asString(), "/api/v1/tests/" + id + "/report?format=junit");
+    CHECK_EQ(received[1].headers.at("x-testhub-event"), std::string("test.completed"));
+    CHECK_EQ(received[1].headers.at("x-testhub-attempt"), std::string("2"));
+    CHECK_EQ(received[1].headers.at("content-type"), std::string("application/json; charset=utf-8"));
+
+    // 状态里能看到回调计数
+    Json status = request(s.port, "GET", "/api/v1/status").json();
+    CHECK_EQ(status["callbacks"]["delivered"].asInt(), 1);
+    CHECK(status["callbacks"]["attempts"].asInt() >= 2);
+    receiver.stop();
+}
+
+TEST_CASE("integration: callback gives up after max attempts and reports failure") {
+    Server s;
+    // 无人监听的端口：连接被拒绝 → 重试 3 次后放弃
+    HttpServerConfig rc;
+    rc.host = "127.0.0.1";
+    rc.port = 0;
+    HttpServer probe(rc);
+    REQUIRE(probe.start());
+    int freePort = probe.port();
+    probe.stop();
+    std::string url = "http://127.0.0.1:" + std::to_string(freePort) + "/hook";
+    HttpResult submit = request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["login.spec"],"callback_url":")" + url + "\"}");
+    REQUIRE_EQ(submit.status, 202);
+    std::string id = submit.json()["test_id"].asString();
+    s.waitForTerminal(id);
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    Json failed;
+    while (std::chrono::steady_clock::now() < deadline) {
+        Json evs = request(s.port, "GET", "/api/v1/tests/" + id + "/events").json()["events"];
+        for (size_t i = 0; i < evs.size(); ++i) if (evs[i]["event"].asString() == "callback.failed") failed = evs[i];
+        if (!failed.isNull()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(!failed.isNull());
+    CHECK_EQ(failed["data"]["attempts"].asString(), std::string("3"));
+    CHECK(!failed["data"]["error"].asString().empty());
+    Json status = request(s.port, "GET", "/api/v1/status").json();
+    CHECK_EQ(status["callbacks"]["failed"].asInt(), 1);
+    CHECK_EQ(status["callbacks"]["pending"].asInt(), 0);
 }
 
 TEST_CASE("integration: results persist across server restarts") {

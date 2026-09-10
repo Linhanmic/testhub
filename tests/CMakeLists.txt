@@ -10,7 +10,8 @@ add_executable(testhub_unit_tests
     test_http_server.cpp
     test_websocket.cpp
     test_execution_engine.cpp
-    test_report_writer.cpp)
+    test_report_writer.cpp
+    test_http_client.cpp)
 target_link_libraries(testhub_unit_tests PRIVATE testhub_core)
 target_compile_definitions(testhub_unit_tests PRIVATE
     TESTHUB_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
