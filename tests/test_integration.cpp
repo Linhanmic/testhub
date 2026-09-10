@@ -407,6 +407,66 @@ TEST_CASE("integration: spec CRUD, validation and concepts") {
     CHECK_EQ(concepts["count"].asInt(), 1);
 }
 
+TEST_CASE("integration: spec directory watcher reloads external changes") {
+    Server s("", [](TestHubConfig& cfg) { cfg.specsWatchIntervalMs = 30; });
+    Json status = request(s.port, "GET", "/api/v1/status").json();
+    CHECK(status["spec_watcher"]["enabled"].asBool());
+    CHECK_EQ(status["spec_watcher"]["interval_ms"].asInt(), 30);
+    CHECK_EQ(status["spec_watcher"]["tracked_files"].asInt(), 4);  // 3 spec + 1 cpt
+
+    auto watcherEvents = [&](const std::string& file) {
+        int n = 0;
+        Json evs = request(s.port, "GET", "/api/v1/events?limit=500").json()["events"];
+        for (size_t i = 0; i < evs.size(); ++i) {
+            if (evs[i]["event"].asString() != "specs.reloaded") continue;
+            if (evs[i]["data"]["source"].asString() != "watcher") continue;
+            if (file.empty() || evs[i]["data"]["files"].asString().find(file) != std::string::npos) ++n;
+        }
+        return n;
+    };
+    auto waitFor = [&](const std::string& file, int atLeast) {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (watcherEvents(file) >= atLeast) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return false;
+    };
+
+    // 外部工具直接写入规范目录（绕过 API）：监控器应发布 specs.reloaded 并让新文件出现在列表中
+    FileUtil::writeFile(s.specsDir + "/external.spec", "# External\n\n## S\n\n* 用户 \"a\" 已登录\n");
+    REQUIRE(waitFor("external.spec", 1));
+    Json list = request(s.port, "GET", "/api/v1/specs").json();
+    bool found = false;
+    for (size_t i = 0; i < list["specs"].size(); ++i) if (list["specs"][i]["file"].asString() == "external.spec") found = true;
+    CHECK(found);
+
+    // 新概念文件：字典自动重载，可通过 /concepts 看到
+    fs::create_directories(s.specsDir + "/concepts");
+    FileUtil::writeFile(s.specsDir + "/concepts/extra.cpt", "# 外部概念 <x>\n* 使用 <x>\n");
+    REQUIRE(waitFor("concepts/extra.cpt", 1));
+    CHECK_EQ(request(s.port, "GET", "/api/v1/concepts").json()["count"].asInt(), 2);
+
+    // 通过 API 写入的文件不会被监控器重复报告
+    int before = watcherEvents("");
+    CHECK_EQ(request(s.port, "PUT", "/api/v1/specs/via-api.spec", "# Via API\n## S\n* 用户 \"a\" 已登录\n", "text/plain").status, 201);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));  // 约 5 个轮询周期
+    CHECK_EQ(watcherEvents(""), before);
+    CHECK_EQ(watcherEvents("via-api.spec"), 0);
+
+    // 外部删除
+    fs::remove(s.specsDir + "/external.spec");
+    REQUIRE(waitFor("external.spec", 2));
+    status = request(s.port, "GET", "/api/v1/status").json();
+    CHECK(status["spec_watcher"]["changes"].asInt() >= 3);
+    CHECK(!status["spec_watcher"]["last_change_at"].asString().empty());
+
+    // 手动 reload 返回 changes 字段并标注 source=manual
+    Json reload = request(s.port, "POST", "/api/v1/specs/reload").json();
+    CHECK(reload["changes"]["created"].isArray());
+    CHECK_EQ(reload["specs"].asInt(), 4);  // login/calculator/checkout/via-api
+}
+
 TEST_CASE("integration: websocket receives welcome and test events") {
     Server s;
     WsClient ws(s.port);
