@@ -217,7 +217,7 @@
     const d = ev.data || {};
     const parts = [];
     if (ev.test_id) parts.push(`<a href="#/tests/${esc(ev.test_id)}">${esc(ev.test_id)}</a>`);
-    for (const k of ['state', 'spec', 'scenario', 'step', 'progress', 'detail', 'message', 'error', 'name', 'url', 'status', 'attempts', 'source', 'action', 'file', 'files', 'created', 'updated', 'deleted']) {
+    for (const k of ['state', 'spec', 'scenario', 'step', 'progress', 'detail', 'message', 'error', 'name', 'url', 'status', 'attempts', 'source', 'action', 'file', 'files', 'created', 'updated', 'deleted', 'slot']) {
       if (d[k] !== undefined && d[k] !== '') {
         let v = d[k];
         if ((k === 'created' || k === 'updated' || k === 'deleted') && v === '0') continue;
@@ -265,11 +265,12 @@
               <dl class="kv">
                 <dt>语言</dt><dd>${esc(runner.language)}</dd>
                 <dt>命令</dt><dd>${esc(runner.command)}</dd>
-                <dt>PID</dt><dd>${runner.pid || '-'}</dd>
+                ${runner.pool_size > 1 ? `<dt>进程池</dt><dd id="st-pool">${poolSummary(runner)}</dd>` : `<dt>PID</dt><dd>${runner.pid || '-'}</dd>`}
                 <dt>版本</dt><dd>${esc(runner.version || '-')}</dd>
                 <dt>重启次数</dt><dd>${runner.restart_count}</dd>
                 ${runner.last_error ? `<dt>最近错误</dt><dd style="color:var(--fail)">${esc(runner.last_error)}</dd>` : ''}
               </dl>
+              ${runner.pool_size > 1 ? `<div class="pool mt" id="st-pool-slots">${poolSlots(runner)}</div>` : ''}
               <div class="mt"><a class="btn sm" href="#/runner">详情</a></div>
             </div>
           </div>
@@ -314,6 +315,9 @@
             wEl.innerHTML = watcherSummary(w);
             if (w.last_change_at) wEl.title = `最近变更 ${fmtTime(w.last_change_at)}`;
           }
+          const r = st.runner || {}, pEl = $('#st-pool'), sEl = $('#st-pool-slots');
+          if (pEl) pEl.innerHTML = poolSummary(r);
+          if (sEl) sEl.innerHTML = poolSlots(r);
         } catch {}
       }, 400);
     };
@@ -328,6 +332,22 @@
     });
     return () => { off(); if (refreshTimer) clearTimeout(refreshTimer); };
   };
+
+  function poolSummary(r) {
+    const size = r.pool_size || 1;
+    const alive = r.alive == null ? '-' : r.alive;
+    const busy = r.busy || 0;
+    return `${size} 个进程 · ${alive} 在线${busy ? ` · <b>${busy}</b> 忙碌` : ''}`;
+  }
+
+  // 池中每个 Runner 进程一个小方块：颜色表示状态，悬停显示明细
+  function poolSlots(r) {
+    const slots = r.runners || [];
+    return slots.map((s) => {
+      const title = `#${s.index} · ${s.state}${s.pid ? ` · pid ${s.pid}` : ''} · ${s.steps_executed || 0} 步${s.restart_count ? ` · 重启 ${s.restart_count}` : ''}${s.last_error ? `\n${s.last_error}` : ''}`;
+      return `<span class="slot ${esc(s.state)}" title="${esc(title)}"><span class="idx">#${s.index}</span><span class="n">${s.steps_executed || 0}</span></span>`;
+    }).join('');
+  }
 
   function watcherSummary(w) {
     if (!w.enabled) return '已关闭';
@@ -819,13 +839,22 @@
   routes.runner = async (main) => {
     const load = async () => {
       const [st, steps] = await Promise.all([api('/runner/status'), api('/runner/steps').catch(() => ({ steps: [], reported: false }))]);
-      main.innerHTML = `${header('Runner', '步骤实现由 Runner 进程执行；内置 mock Runner 无需外部依赖', `<button class="btn" id="restart">↻ 重启 Runner</button>`)}
+      const pooled = (st.pool_size || 1) > 1;
+      const slotRows = (st.runners || []).map((s) => `<tr>
+            <td>#${s.index}</td><td>${pill(s.state)}</td><td>${s.pid || '-'}</td><td>${esc(s.version || '-')}</td>
+            <td>${s.steps_executed || 0}</td><td>${s.restart_count}</td><td>${fmtTime(s.last_heartbeat)}</td>
+            <td class="muted small">${s.last_error ? `<span style="color:var(--fail)">${esc(s.last_error)}</span>` : (s.busy ? '执行中' : '空闲')}</td></tr>`).join('');
+      main.innerHTML = `${header('Runner', pooled ? `Runner 池：${st.pool_size} 个进程并行执行测试，每个测试独占一个进程` : '步骤实现由 Runner 进程执行；内置 mock Runner 无需外部依赖', `<button class="btn" id="restart">↻ 重启 Runner</button>`)}
         <div class="grid grid-main">
           <div class="card"><div class="card-header"><h2>状态</h2>${pill(st.state)}</div><div class="card-body"><dl class="kv">
-            <dt>语言</dt><dd>${esc(st.language)}</dd><dt>命令</dt><dd>${esc(st.command)}</dd><dt>PID</dt><dd>${st.pid || '-'}</dd>
+            <dt>语言</dt><dd>${esc(st.language)}</dd><dt>命令</dt><dd>${esc(st.command)}</dd>
+            ${pooled ? `<dt>进程池</dt><dd>${poolSummary(st)}</dd>` : `<dt>PID</dt><dd>${st.pid || '-'}</dd>`}
             <dt>版本</dt><dd>${esc(st.version || '-')}</dd><dt>启动于</dt><dd>${fmtTime(st.started_at)}</dd><dt>最近心跳</dt><dd>${fmtTime(st.last_heartbeat)}</dd>
             <dt>重启次数</dt><dd>${st.restart_count}</dd>${st.last_error ? `<dt>最近错误</dt><dd style="color:var(--fail)">${esc(st.last_error)}</dd>` : ''}
-          </dl></div></div>
+          </dl>
+          ${pooled ? `<div class="table-wrap mt"><table><thead><tr><th>进程</th><th>状态</th><th>PID</th><th>版本</th><th>已执行步骤</th><th>重启</th><th>最近心跳</th><th></th></tr></thead><tbody>${slotRows}</tbody></table></div>
+          <p class="muted small mt">池大小由 <code>--runner-pool</code> / <code>runner.pool_size</code> 控制（默认跟随 <code>-j</code>）。某个进程崩溃时只会重启该进程，不影响其他正在执行的测试。</p>` : ''}
+          </div></div>
           <div class="card"><div class="card-header"><h2>已实现步骤</h2><span class="muted small">${steps.reported ? steps.count + ' 个' : '未报告'}</span></div>
             <div class="card-body">${steps.steps.length ? steps.steps.map((s) => `<div class="step"><span class="mark">·</span><span class="text">${highlightStep(s.parameterized_text)}</span></div>`).join('') : '<div class="muted">该 Runner 未报告步骤列表（mock Runner 接受任意步骤）。</div>'}</div></div>
         </div>
