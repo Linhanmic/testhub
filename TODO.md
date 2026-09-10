@@ -5,7 +5,7 @@
 ## 当前状态（v1.1.0）
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
-- 88 个自动化测试全部通过（67 单元 + 14 集成 + 7 Python 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
+- 96 个自动化测试全部通过（74 单元 + 15 集成 + 7 Python 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
 - 约 12k 行（含前端、Python Runner、测试）
 
 ## 路线图
@@ -17,7 +17,7 @@
 - [x] `.spec` / `.cpt` 解析器（标题、标签、上下文、清理、数据表、参数、概念、行号、错误与警告）
 - [x] HTTP/1.1 服务器（Content-Length、keep-alive、流水线、超时、`{param}` 路由、HEAD/OPTIONS/405、CORS、ETag 静态资源、SPA 回退）
 - [x] 执行引擎（优先级队列、标签表达式、场景过滤、数据驱动、上下文/清理、超时、取消、fail_fast、重跑、历史）
-- [x] Runner 抽象 + 子进程桥接（JSON-lines、心跳、自动重启、场景级会话锁、步骤缓存）
+- [x] Runner 抽象 + 子进程桥接（JSON-lines、崩溃检测、自动重启、步骤缓存）
 - [x] Python 参考 Runner（装饰器、钩子、DataTable、Messages、SkipStep、data_store）+ 示例步骤实现
 - [x] 异步事件总线 + WebSocket 推送（订阅过滤、历史回放）
 - [x] 内嵌 Web UI（总览、提交、测试记录、结果树、实时执行树、规范浏览/编辑/校验、Runner、事件流）
@@ -28,11 +28,12 @@
 - [x] 回调通知：`callback_url` 完成后 POST 摘要，指数退避重试，`callback.*` 事件与状态计数
 - [x] 鉴权：`server.auth_token` Bearer Token（写操作 / 可选全保护），UI token 输入与 401 处理
 - [x] 规范目录监控：轮询快照，外部变更自动重载概念并推送 `specs.reloaded`，UI 实时刷新
+- [x] Runner 池：每个并发测试独占一个 Runner 进程真正并行，逐槽自愈，UI 展示每个进程
 
 ### P1 — 下一步（按优先级）
 
-- [ ] **Runner 池**：`max_concurrent_tests > 1` 时启动多个 Runner 进程真正并行（当前为场景级串行）
 - [ ] **Node.js 参考 Runner**：复用 JSON-lines 协议，验证语言无关性
+- [ ] **测试内并行**：把单个测试的场景拆到池中多个进程（Gauge `--parallel` 流语义），需要按进程隔离 suite/spec 钩子
 
 ### P2 — 增强
 
@@ -149,6 +150,18 @@
 - 测试：4 个单测（增删改检测与相对路径、概念重载、acknowledge 与稳定窗口、后台线程/禁用模式）+ 1 个集成测试（外部写入/删除被运行中的服务器发现、`/specs` `/concepts` 同步、API 写入不重复报告、状态计数、手动 reload 的 changes）
 - 浏览器实测：打开规范页 → 终端写入 `watch-demo.spec` → 列表自动出现新行；删除后自动消失；总览显示"每 1 s · 5 个文件 · 2 次变更"
 
+### 迭代 14 — Runner 池
+
+- `RunnerBridge` 重写为 Runner 池：`runner.pool_size` / `--runner-pool`（默认 0 = 跟随 `-j`）个槽位，每个槽位一个独立 Runner 进程；`acquireSession()` 改为 RAII `Session`，独占槽位并用 `thread_local` 绑定到当前线程，此后该线程的步骤/钩子都落在绑定的进程上
+- 引擎把会话从"场景级"提升到"测试级"：`executeTest` 开头申请进程并持有到结束，一个测试 = 一个进程（before_suite … after_suite 同进程），不同测试真正并行；没有空闲进程时测试保持 `queued`
+- 逐槽自愈：每个槽位独立的 `restart_count` 预算，重启在锁外进行不阻塞其他槽位；分配时优先在线槽位，其次可重启槽位，全部永久失效才返回明确错误而非无限等待；并发安全的 mock 自动收缩为 1 个共享槽位
+- `stop/restart` 先排空（新会话等待）再并行停止/拉起全部进程；`/runner/status` 新增 `pool_size / alive / busy` 与 `runners[]` 明细；`runner.*` 事件携带 `slot`；子进程可读 `TESTHUB_RUNNER_INDEX` / `TESTHUB_RUNNER_POOL_SIZE`
+- **中途放弃的方案**：最初把 suite/spec 级钩子设计成"在池中每个进程上各执行一次"（Gauge 语义），实测两个 0.8 s 的测试总耗时 1.6 s——广播时要依次等待每个被占用的进程，测试之间实际上被串行化了。改为测试级会话后总耗时 < 1 s
+- **顺带发现并修复的死锁**：Runner 命令经 `sh -c` 启动，`kill -9` 掉 `sh` 后真正的 python 进程成为孤儿并继续持有管道，读线程永远等不到 EOF，`ProcessRunner::stop()` 在 `join()` 上永久阻塞——槽位卡在 `connecting`、`TestHub::stop()` 也无法退出（单 Runner 时代同样存在）。修复：子进程启动即自成进程组，`terminate()` 无论直接子进程是否已退出都清理整个进程组
+- UI：总览 Runner 卡片显示"3 个进程 · 3 在线 · 2 忙碌"与每进程小方块（颜色=状态，悬停看 PID/步骤数/重启数/错误）；Runner 页新增每进程表格；事件流显示 `slot`
+- 测试：7 个单测（注入假 Runner：并行分配与会话绑定、阻塞等待与 busy 状态、逐槽重启、每槽重启预算与健康槽位优先、会话内钩子绑定、并发安全收缩、停止等待与重启替换）+ 1 个真实 Python 池集成测试（两进程并行 < 1.5 s、`kill -9` 后按需自愈且孤儿进程组消失、手动重启替换全部进程）；gcc/clang/TSan 全绿，35 轮循环零失败
+- 浏览器实测：`-j 3` 提交 3 个 5 s 的 `slow.spec`，三个测试 5.00 / 5.00 / 5.01 s 同时完成（之前串行为 7 s / 10 s）；`kill -9` 一个进程后再提交 3 个并发测试，该槽位重启（restart 1）、全部通过
+
 ---
 
 ## 决策记录
@@ -166,6 +179,8 @@
 | 迭代 10 | 回调客户端自研且仅支持 http:// | 保持零依赖；HTTPS 需要 TLS 库，交给反向代理/内网中转更符合守护进程的部署形态 |
 | 迭代 11 | 单一共享 token，默认只保护写操作 | 守护进程多部署在内网/CI；先解决"误操作与未授权写入"，读保护按需开启；多用户/角色留待有明确需求时再做 |
 | 迭代 13 | 目录监控用轮询快照而非 inotify/FSEvents | 零依赖、三平台同一实现、无需处理事件合并与队列溢出；规范目录规模小，秒级轮询开销可忽略；稳定窗口天然解决编辑器分步写入 |
+| 迭代 14 | Runner 池的分配粒度从"场景"改为"测试"（推翻迭代 5 的结论） | 迭代 5 只有一个进程，场景级是在"串行"里争取交错；有了多进程后，测试级让每个测试独占进程：suite/spec 钩子天然只在自己的进程上执行、无需广播、不同测试互不干扰；代价是 `pool_size < -j` 时多余 worker 空等，而默认池大小跟随 `-j` 消除了这一情形 |
+| 迭代 14 | 进程存活检查按需进行（分配时），不加心跳线程 | 每次分配/每步执行前都会 `waitpid(WNOHANG)`，成本可忽略；崩溃的进程在下次使用时重启，UI 报告"will be restarted on next use"；额外的心跳线程只会更早发现但不会更早需要它 |
 
 ---
 
@@ -174,7 +189,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 88 个，全部通过；`ctest` 约 3 s；TSan 零告警 |
+| 自动化测试 | 96 个，全部通过；`ctest` 约 5 s；TSan 零告警 |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
 | 代码规模 | 约 14k 行（C++ 约 10.2k，前端约 1.2k，Python 约 0.7k，测试约 2.4k） |

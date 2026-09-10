@@ -45,13 +45,13 @@ TestHub 复用 Gauge 的规范语法（`.spec` / `.cpt`），便于迁移已有�
                  │    └─ ResultStore (data/results/<id>.json，启动时回放)             │
                  │  CallbackNotifier ◄──subscribe(test.completed)── EventBus        │
                  │    └─ HttpClient ── POST callback_url（指数退避重试）──► 外部系统   │
-                 │  RunnerBridge (会话锁、心跳、自动重启、步骤缓存)                    │
-                 │    ├─ MockRunner  (进程内，所有步骤通过，可配置延迟)               │
-                 │    └─ ProcessRunner (POSIX fork/exec 或 Windows CreateProcess)   │
+                 │  RunnerBridge (Runner 池：槽位 ×N、测试级会话、逐槽自愈、步骤缓存)  │
+                 │    ├─ MockRunner  (进程内，并发安全 → 池收缩为 1 个共享槽位)        │
+                 │    └─ ProcessRunner ×N (POSIX fork/exec 或 Windows CreateProcess)│
                  └────────────────────────────┼───────────────────────────────────┘
-                                              │ stdin/stdout JSON-lines
+                                              │ stdin/stdout JSON-lines（每进程一对管道）
                                               ▼
-                              runners/python/testhub_runner.py → step_impl/*.py
+                       runners/python/testhub_runner.py ×N → step_impl/*.py
 ```
 
 ### 2.1 线程模型
@@ -60,10 +60,10 @@ TestHub 复用 Gauge 的规范语法（`.spec` / `.cpt`），便于迁移已有�
 |------|------|------|
 | accept 线程 | 1 | `poll()` 监听 socket，接入连接后交给工作池 |
 | HTTP 工作线程 | `server.worker_threads`（默认 8） | 解析请求（keep-alive、流水线）、路由、响应；WebSocket 升级后该线程转为该连接的读循环 |
-| 引擎 worker | `execution.max_concurrent_tests`（默认 1） | 从队列取测试并执行 |
+| 引擎 worker | `execution.max_concurrent_tests`（默认 1） | 从队列取测试并执行；执行前向 Runner 池申请一个槽位（会话），测试期间独占 |
 | EventBus 派发线程 | 1 | 把事件异步投递给订阅者（WS 连接、引擎内部、日志），避免阻塞发布方 |
-| Runner 读线程 | 每个 ProcessRunner 1 | 读取子进程 stdout，按 `id` 匹配响应；`log` 消息转为 `runner.log` 事件 |
-| 心跳线程 | 1（RunnerBridge） | 周期 `ping`，超时/退出时按 `auto_restart` 重启 |
+| Runner 读线程 | 每个 ProcessRunner 2（stdout / stderr） | 读取子进程输出，按 `id` 匹配响应；`log` 消息转为 `runner.log` 事件 |
+| Runner 启动线程 | 临时，池大小 −1 | 池启动/重启时并行拉起其余 Runner 进程，随后 join |
 | 回调投递线程 | 1（CallbackNotifier） | 按到期时间取任务 POST `callback_url`，失败指数退避重试 |
 | 规范监控线程 | 1（SpecWatcher，可禁用） | 每 `specs.watch_interval_ms` 扫描一次目录快照，变更时重载概念并发布 `specs.reloaded` |
 
@@ -174,11 +174,16 @@ class Runner {                      // 抽象接口
 
 - `MockRunner`：进程内实现，所有步骤通过，可配置 `mock_delay_ms`，`isConcurrencySafe() == true`；用于测试与演示。
 - `ProcessRunner`：启动子进程（POSIX `fork/exec` 经 `/bin/sh -c`，Windows `CreateProcess`），stdin 写请求、stdout 读响应、stderr 直通日志；请求携带递增 `id`，响应按 `id` 匹配，支持超时。
-- `RunnerBridge`：
-  - 按 `runner.language` 选择实现：`mock` / `python`（自动定位 `runners/python/testhub_runner.py`：`$TESTHUB_HOME`、可执行文件所在目录及其上级、`share/testhub`、当前目录）/ `node` / `custom`（`runner.command`）。
-  - `acquireSession()` 返回 `std::unique_lock<std::recursive_mutex>`：对非并发安全 Runner，引擎在整个场景期间持有它，多个 worker 不会交错同一 Runner 的步骤；并发安全 Runner 返回空锁。
-  - 心跳 `ping` / 崩溃检测 / `auto_restart`（上限 `max_restarts`），重启期间通过 `shared_ptr<Runner>` 保证正在执行的调用安全。
-  - 缓存 `get_steps` 结果，供 `GET /runner/steps` 与 UI 的"未实现步骤"标注使用。
+- `ProcessRunner::stop()` 先发 `kill` 消息礼貌等待，再对**进程组**发 SIGTERM/SIGKILL。命令经 `sh -c` 启动，子进程 `setpgid(0,0)` 自成进程组；若 `sh` 被外部杀死，真正的 Runner 会成为孤儿并继续持有管道，读线程永远等不到 EOF——因此即使直接子进程已退出也要清理进程组（迭代 14 修复的死锁）。
+- `RunnerBridge`（Runner 池）：
+  - 按 `runner.language` 选择实现：`mock` / `python`（自动定位 `runners/python/testhub_runner.py`：`$TESTHUB_HOME`、可执行文件所在目录及其上级、`share/testhub`、当前目录）/ `node` / `custom`（`runner.command`）；`setRunnerFactory()` 允许测试/嵌入方注入自定义 Runner。
+  - **槽位**：`runner.pool_size`（`--runner-pool`，0 = 跟随 `max_concurrent_tests`，上限 64）个 `Slot{runner, state, restartCount, users, stepsExecuted…}`。启动时先拉起槽位 0 探测 `isConcurrencySafe()`：并发安全（mock）→ 池收缩为 1 个共享槽位；否则并行拉起其余进程，每个子进程可通过环境变量 `TESTHUB_RUNNER_INDEX` / `TESTHUB_RUNNER_POOL_SIZE` 得知自己的位置。
+  - **会话**：`acquireSession()` 返回 RAII `Session`，独占一个空闲槽位并通过 `thread_local` 绑定到当前线程；此后该线程的 `executeStep/runHook` 都落在绑定的 Runner 上。引擎在 `executeTest` 开始处获取会话并持有到测试结束——一个测试 = 一个进程（before_suite … after_suite 全部同进程，与 Gauge 并行流语义一致），不同测试真正并行；没有空闲槽位时测试保持 `queued` 等待。会话外的调用（`GET /runner/steps`、独立钩子）临时占用一个空闲槽位。
+  - **分配策略**：优先空闲且在线的槽位，其次可重启的槽位；只有所有槽位都永久失效（重启预算耗尽）时才分配失效槽位，让调用方得到明确错误而不是无限等待。
+  - **逐槽自愈**：`ensureAlive(slot)` 在槽位被独占的前提下检查进程存活，按 `auto_restart` / `max_restarts`（每槽独立预算）重启；重启只影响该槽位，其他测试不受干扰；重启在锁外进行，不阻塞其他槽位的执行与状态查询。进程在两次使用之间退出时按需重启（下次分配到它时），状态里报告为 `error` + "will be restarted on next use"。
+  - **生命周期**：`stopRunner()` / `restartRunner()` 先置 `draining_`（新会话等待），等待所有槽位释放，再并行停止/拉起全部进程；`lifecycleMutex_` 串行化这三种操作。
+  - `getStatus()` 聚合：任一槽位在线即 `connected`（有会话占用则 `busy`），全部离线且有失败为 `error`；`pool_size / alive / busy / restart_count（总和）` 与 `runners[]` 明细（`index/state/pid/version/restart_count/steps_executed/busy/last_error`）。Runner 事件 `runner.*` 携带 `slot`。
+  - 缓存 `get_steps` 结果（任一在线 Runner 即可回答，不占用槽位），供 `GET /runner/steps` 与 UI 的"未实现步骤"标注使用。
 
 ### 3.6 EventBus（`src/event/event_bus.*`）
 
@@ -258,7 +263,7 @@ JSON 序列化位于 `src/model/json_convert.h`，字段名为 snake_case（`spe
 | `spec.started` / `spec.completed` | `spec`, `name`, `scenarios`, `tags`, `state`, `duration`, `error` |
 | `scenario.started` / `scenario.completed` | `spec`, `scenario`, `tags`, `steps`, `data_row`, `state`, `duration`, `error` |
 | `step.started` / `step.completed` | `spec`, `scenario`, `step`, `parameterized_text`, `is_concept`, `state`, `duration`, `error` |
-| `runner.connecting` / `runner.connected` / `runner.disconnected` / `runner.error` / `runner.log` | `language`, `pid`, `version`, `message`, `level` |
+| `runner.connecting` / `runner.connected` / `runner.disconnected` / `runner.error` / `runner.log` | `language`, `slot`（池中槽位序号）, `detail` / `message`, `level` |
 | `queue.updated` | `queue_size`, `action`（enqueued/dequeued/cancelled） |
 | `specs.reloaded` | `source`（manual / api / watcher）；api：`file`, `action`（created/updated/deleted）；watcher：`created`, `updated`, `deleted` 计数、`files`、`concepts`、`concepts_reloaded` |
 | `callback.delivered` / `callback.failed` | `url`, `status`, `attempts`, `error` |
@@ -338,7 +343,8 @@ JSON 文件（`--config`），键与 `--print-config` 输出一致：
   "server":    {"host":"0.0.0.0","port":8080,"worker_threads":8,"web_ui":true,"web_dir":"",
                 "auth_token":"","auth_protect_reads":false},
   "runner":    {"language":"python","command":"","project_path":"runners/python",
-                "connection_timeout":15000,"request_timeout":60000,"auto_restart":true,"max_restarts":5,"mock_delay_ms":0},
+                "connection_timeout":15000,"request_timeout":60000,"auto_restart":true,"max_restarts":5,"mock_delay_ms":0,
+                "pool_size":0},
   "execution": {"max_concurrent_tests":1,"default_timeout":300000,"step_timeout":60000,"history_limit":200,
                 "results_dir":"data/results","environment":{"BASE_URL":"http://localhost:3000"}},
   "callbacks": {"enabled":true,"timeout_ms":10000,"max_attempts":3,"retry_backoff_ms":1000,"public_base_url":""},
@@ -374,8 +380,8 @@ cmake/EmbedResources.cmake
 
 ## 8. 质量保障
 
-- **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405、请求过滤器；鉴权策略（读/写、凭据来源、常量时间比较）；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）；报表（JUnit 结构与计数、转义、空结果、HTML 自包含）。
-- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）、Bearer Token（写保护与全保护两种模式、WebSocket 查询参数）、WebSocket 秒连秒断压力回归。
+- **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405、请求过滤器；鉴权策略（读/写、凭据来源、常量时间比较）；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）；报表（JUnit 结构与计数、转义、空结果、HTML 自包含）；规范目录监控；Runner 池（注入假 Runner：并行分配与会话绑定、阻塞等待、逐槽重启与预算、健康槽位优先、并发安全收缩、停止/重启生命周期）。
+- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）、Bearer Token（写保护与全保护两种模式、WebSocket 查询参数）、WebSocket 秒连秒断压力回归、目录监控端到端、**真实 Python Runner 池**（两个进程并行执行两个 0.8 s 的测试总耗时 < 1.5 s；`kill -9` 其中一个进程后按需自愈且孤儿进程组被清理；手动重启替换全部进程；无 `python3` 时跳过）。
 - **并发正确性**：所有线程句柄的赋值与检查共享同一把锁（WebSocket 读线程见 `Connection::readerMutex`）；停止流程在持锁状态下改标志再 `notify`，避免丢失唤醒；终态记录先落盘再对外可见。排查偶发问题时用 ThreadSanitizer 构建（`-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"`）运行集成测试，当前零告警。
 - **协议测试**（`python_runner_protocol`）：以子进程启动 Python Runner，验证 ping/get_steps/execute_step/hook/kill 与错误路径。
 - **CI**：Ubuntu（g++、clang++）与 macOS，`-Wall -Wextra -Wpedantic -Werror`，`ctest`，二进制冒烟（curl）。
@@ -383,7 +389,8 @@ cmake/EmbedResources.cmake
 ## 9. 已知限制与演进方向
 
 - 结果以单文件 JSON 持久化，适合中小规模历史；海量历史或跨实例查询需要 SQLite/数据库后端。
-- 同一时刻只有一个 Runner 进程；`max_concurrent_tests > 1` 时通过场景级会话锁串行化步骤执行，真正并行需要 Runner 池。
+- Runner 池以"测试"为分配粒度：`pool_size < max_concurrent_tests` 时多余的 worker 会等待空闲进程（测试保持 `queued`），而不是把不同测试的场景交错到同一进程；同一测试内的场景仍在单进程上顺序执行，跨进程拆分单个测试的场景（Gauge 的 `--parallel` 流）尚未实现。
+- `POST /runner/restart` 与关停会等待正在执行的测试释放进程；长测试期间的手动重启因此可能等待较久（可先取消测试）。
 - 回调仅支持 `http://`（无 TLS）；需要 HTTPS 时请经由本地反向代理或内网中转。
 - 鉴权为单一共享 Bearer Token（无用户/角色区分），且服务本身不提供 TLS；公网暴露时请置于 HTTPS 反向代理之后。
 

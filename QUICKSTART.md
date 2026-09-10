@@ -78,7 +78,7 @@ src/engine/test_queue.h    优先级队列（priority + 提交时间）
 src/engine/tag_filter.h    标签表达式解析（& | ! 括号）
 src/runner/runner.h        Runner 抽象接口（start/stop/getAllSteps/executeStep/runHook/isConcurrencySafe）
 src/runner/process_runner.* POSIX/Windows 子进程 + JSON-lines
-src/runner/runner_bridge.*  会话锁、心跳、自动重启、步骤缓存
+src/runner/runner_bridge.*  Runner 池：槽位分配、测试级会话（thread_local 绑定）、逐槽自愈、状态聚合、步骤缓存
 src/spec/spec_parser.*     .spec/.cpt 解析器，ConceptDictionary
 src/spec/spec_repository.* 规范目录扫描、读取、写入、校验
 src/spec/spec_watcher.*    规范目录轮询监控（自动重载概念、推送 specs.reloaded）
@@ -132,6 +132,8 @@ http.get("/api/v1/hello/{name}", [this](const HttpRequest& req) {
 
 完整协议见 [DESIGN.md §5.3](DESIGN.md#53-runner-通信协议)，参考实现见 `runners/python/testhub_runner.py`。用 `--language custom --runner-cmd "node my_runner.js"` 接入。
 
+并发（`-j N`）时 TestHub 默认启动 N 个 Runner 进程组成池，每个测试独占一个进程，因此 Runner 只需处理串行请求、不必线程安全；进程可通过环境变量 `TESTHUB_RUNNER_INDEX` / `TESTHUB_RUNNER_POOL_SIZE` 区分自己（例如为每个进程分配独立的浏览器 profile 或端口）。`--runner-pool <n>` 可单独指定进程数。收到 `kill` 后请尽快退出，否则 1.5 s 后会被 SIGTERM/SIGKILL 终止整个进程组。
+
 ### 添加规范示例
 
 把 `.spec` 放入 `specs/`，概念放入 `specs/concepts/`。服务默认每 2 秒轮询规范目录，用编辑器或 `git pull` 改动的文件会自动生效（概念自动重载，UI 规范页实时刷新并提示）；也可以调用 `POST /api/v1/specs/reload` 或在 UI 点击"重新加载"立即扫描。`--watch-interval <ms>` 调整频率，`--no-watch` 关闭。
@@ -151,6 +153,9 @@ http.get("/api/v1/hello/{name}", [this](const HttpRequest& req) {
 
 **Runner 状态是 `disconnected` / `step_count: 0`**
 检查 `--dir` 指向包含 `step_impl/` 的目录；查看服务器日志中 Runner 的 stderr 输出；`POST /api/v1/runner/restart` 可手动重启。
+
+**Runner 页某个进程显示 `error`："Runner process exited (will be restarted on next use)"**
+池中的进程在两次测试之间退出了（被杀、崩溃、OOM）。这不影响其他进程；该槽位会在下次分配到它时自动重启（受 `runner.max_restarts` 每槽预算限制），也可以立即 `POST /api/v1/runner/restart` 重启全部进程。
 
 **提交测试返回 400，提示 "Spec path(s) not found"**
 `spec_files` 是相对规范目录的路径（如 `login.spec`、`checkout/pay.spec`），不是绝对路径；`GET /api/v1/specs` 可查看可用文件名。

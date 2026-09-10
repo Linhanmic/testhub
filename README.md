@@ -17,11 +17,11 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 | 报表 | 按需导出 JUnit XML（供 Jenkins / GitLab / GitHub Actions 收集）与自包含 HTML 报告；UI 一键下载 |
 | 回调 | 请求携带 `callback_url`，测试结束后 POST JSON 摘要（含失败场景清单与报表链接），失败按指数退避重试 |
 | 鉴权 | 可选 Bearer Token：默认保护写操作，可扩展到读操作与 WebSocket；UI 内置 token 输入 |
-| Runner | 跨平台子进程桥接 + JSON-lines 协议；内置 mock Runner；Python 参考 Runner（装饰器式步骤实现、钩子、数据表、消息）；自动重启；并发测试时场景级独占会话 |
+| Runner | 跨平台子进程桥接 + JSON-lines 协议；内置 mock Runner；Python 参考 Runner（装饰器式步骤实现、钩子、数据表、消息）；**Runner 池**：每个并发测试独占一个 Runner 进程真正并行，进程逐个自愈、按需重启 |
 | 服务端 | 多线程 HTTP/1.1（keep-alive、流水线、Content-Length、超时、`{param}` 路由、CORS、HEAD/OPTIONS、ETag 静态资源、SPA 回退） |
 | 实时性 | 异步事件总线；`/ws/v1/events` WebSocket 推送（按类型/测试 ID 订阅、历史回放） |
 | Web UI | 内嵌单页应用：总览、提交测试、测试记录、结果树、运行中实时执行树、规范浏览/编辑/校验、Runner 状态、事件流、暗色模式 |
-| 质量 | 67 个单元测试 + 14 个 HTTP/WS 集成测试 + 7 个 Python 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
+| 质量 | 74 个单元测试 + 15 个 HTTP/WS 集成测试 + 7 个 Python 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
 
 ## 快速开始
 
@@ -43,6 +43,9 @@ ctest --test-dir build --output-on-failure   # 可选：运行全部测试
 
 # 使用 Python 参考 Runner 执行仓库自带的示例规范
 ./build/testhub --port 8080 --language python --dir runners/python
+
+# 4 个测试并发：默认拉起 4 个 Runner 进程（Runner 池），每个测试独占一个进程
+./build/testhub --language python --dir runners/python -j 4
 
 # 后台运行
 ./build/testhub --daemon --pid-file /tmp/testhub.pid --log-file /tmp/testhub.log --config testhub.json
@@ -128,8 +131,8 @@ Runner 启动时会加载 `--dir` 下 `step_impl/` 中的全部 Python 文件。
 | POST | `/api/v1/specs/reload` | 立即重新扫描规范目录（返回 `changes`；目录监控开启时通常无需手动调用） |
 | GET / PUT / DELETE | `/api/v1/specs/{path}` | 读取（`?raw=true`）/ 创建或更新 / 删除规范 |
 | GET | `/api/v1/concepts` | 列出概念 |
-| GET | `/api/v1/runner/status` | Runner 状态 |
-| POST | `/api/v1/runner/restart` | 重启 Runner |
+| GET | `/api/v1/runner/status` | Runner 池状态（聚合 + `runners[]` 每个进程的状态/PID/已执行步骤/重启次数） |
+| POST | `/api/v1/runner/restart` | 重启池中全部 Runner 进程（等待正在执行的测试结束） |
 | GET | `/api/v1/runner/steps` | Runner 报告的已实现步骤 |
 | GET | `/api/v1/events?limit=&type=&test_id=` | 全局事件历史 |
 | WS | `/ws/v1/events` | 实时事件流 |
@@ -144,6 +147,7 @@ WebSocket 连接后发送 `{"action":"subscribe","events":["test.*","scenario.*"
 -l, --language <lang>      Runner 语言：mock | python | node | custom（默认 mock）
 -r, --runner-cmd <cmd>     自定义 Runner 启动命令
 -d, --dir <path>           测试项目目录（Runner 工作目录）
+    --runner-pool <n>      Runner 进程数（默认 0：跟随 -j，每个并发测试一个进程）
 -s, --specs <path>         规范目录（默认 specs）
     --concepts <path>      概念目录（默认与规范目录相同）
     --watch-interval <ms>  规范目录轮询间隔（默认 2000，0 禁用）
@@ -178,12 +182,12 @@ WebSocket 连接后发送 `{"action":"subscribe","events":["test.*","scenario.*"
 │  Web UI (SPA)      ExecutionEngine ── TestQueue(优先级) ── worker 线程 ×N       │
 │                           │  SpecRepository / SpecParser / ConceptDictionary   │
 │                           ▼                                                   │
-│                     RunnerBridge (会话锁、自动重启、心跳)                        │
+│                     RunnerBridge (Runner 池：槽位 ×N、测试级会话、逐槽自愈)       │
 │                    ┌──────┴───────┐                                           │
-│                MockRunner    ProcessRunner (stdin/stdout JSON-lines)           │
+│                MockRunner    ProcessRunner ×N (stdin/stdout JSON-lines)        │
 └─────────────────────────────────────┼─────────────────────────────────────────┘
                                       ▼
-                     runners/python/testhub_runner.py  ( step_impl/*.py )
+                     runners/python/testhub_runner.py ×N  ( step_impl/*.py )
 ```
 
 详细设计见 [DESIGN.md](DESIGN.md)，开发指南见 [QUICKSTART.md](QUICKSTART.md)，任务与迭代记录见 [TODO.md](TODO.md)。
