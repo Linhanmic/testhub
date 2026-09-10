@@ -135,6 +135,12 @@ using RequestHandler = std::function<HttpResponse(const HttpRequest&)>;
 using UpgradeHandler = std::function<bool(socket_t socket, const HttpRequest& request)>;
 
 /**
+ * 请求过滤器：在路由之前调用（OPTIONS 预检除外，WebSocket 升级也会经过）。
+ * 返回 false 表示拒绝，此时 denied 作为响应发送。
+ */
+using RequestFilter = std::function<bool(const HttpRequest& request, HttpResponse& denied)>;
+
+/**
  * 服务器配置
  */
 struct HttpServerConfig {
@@ -191,6 +197,14 @@ public:
     void setFallback(RequestHandler handler) { fallback_ = std::move(handler); }
 
     /**
+     * 请求过滤器（鉴权等）；仅支持一个，置空表示移除
+     */
+    void setRequestFilter(RequestFilter filter) {
+        std::lock_guard<std::mutex> lock(routesMutex_);
+        filter_ = std::move(filter);
+    }
+
+    /**
      * 直接处理一个请求（不经网络；用于单元测试）
      */
     HttpResponse dispatch(const HttpRequest& request);
@@ -236,6 +250,7 @@ private:
     std::map<std::string, StaticAsset> assets_;
     std::vector<std::pair<std::string, std::string>> directories_;
     RequestHandler fallback_;
+    RequestFilter filter_;
 
     std::atomic<size_t> activeConnections_{0};
     std::atomic<unsigned long long> requestCount_{0};

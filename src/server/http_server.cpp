@@ -519,10 +519,20 @@ void HttpServer::handleConnection(socket_t client, const std::string& remote) {
         // WebSocket 升级
         if (StringUtil::toLower(request.header("upgrade")) == "websocket") {
             UpgradeHandler upgrade;
+            RequestFilter filter;
             {
                 std::lock_guard<std::mutex> lock(routesMutex_);
                 auto it = upgrades_.find(request.path);
                 if (it != upgrades_.end()) upgrade = it->second;
+                filter = filter_;
+            }
+            if (upgrade && filter) {
+                HttpResponse denied;
+                if (!filter(request, denied)) {
+                    if (config_.logRequests) TH_LOG_DEBUG("http", remote + " UPGRADE " + request.path + " -> " + std::to_string(denied.statusCode));
+                    sendAll(client, serialize(denied, false));
+                    break;
+                }
             }
             if (upgrade) {
                 if (config_.logRequests) TH_LOG_DEBUG("http", remote + " UPGRADE " + request.path);
@@ -707,6 +717,17 @@ HttpResponse HttpServer::dispatch(const HttpRequest& input) {
             response.headers["Access-Control-Allow-Headers"] = request.header("access-control-request-headers", "Content-Type, Authorization");
             response.headers["Access-Control-Max-Age"] = "600";
         } else {
+            RequestFilter filter;
+            {
+                std::lock_guard<std::mutex> lock(routesMutex_);
+                filter = filter_;
+            }
+            HttpResponse denied;
+            if (filter && !filter(request, denied)) {
+                if (config_.enableCors) denied.headers["Access-Control-Allow-Origin"] = "*";
+                if (request.method == "HEAD") denied.body.clear();
+                return denied;
+            }
             RequestHandler handler;
             std::map<std::string, std::string> params;
             bool methodMismatch = false;
