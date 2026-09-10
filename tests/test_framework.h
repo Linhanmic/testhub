@@ -118,6 +118,8 @@ inline int runAll(int argc, char** argv) {
             std::cout << "[ FAIL ] " << t.name << " (" << static_cast<int>(ms) << " ms)\n";
             for (auto& m : ctx.messages) std::cout << "    " << m << "\n";
         }
+        // CI 下 stdout 是管道（全缓冲），进程异常终止会吞掉未刷新的结果行，导致日志错位难以定位崩溃点
+        std::cout.flush();
     }
     double total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - suiteStart).count();
     std::cout << "\n" << passed << " passed, " << failed << " failed";

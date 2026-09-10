@@ -436,6 +436,18 @@ TEST_CASE("integration: websocket receives welcome and test events") {
 
     // 订阅过滤：只接收 test.* 事件
     ws.sendText(R"({"action":"subscribe","events":["test.*"]})");
+    // 等待服务端确认过滤器生效，否则新测试的早期事件可能在过滤器安装前就已发出
+    bool acked = false;
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!acked && std::chrono::steady_clock::now() < deadline) {
+        if (!ws.readText(payload, 3000)) break;
+        Json msg = Json::parse(payload);
+        if (msg["type"].asString() == "subscribed") {
+            acked = true;
+            CHECK_EQ(msg["events"].size(), static_cast<size_t>(1));
+        }
+    }
+    REQUIRE(acked);
     HttpResult second = request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["login.spec"]})");
     std::string id2 = second.json()["test_id"].asString();
     bool sawStep = false, done = false;
@@ -451,6 +463,36 @@ TEST_CASE("integration: websocket receives welcome and test events") {
     CHECK(done);
     CHECK(!sawStep);
     CHECK(s.hub.getWebSocketServer().connectionCount() >= 1);
+}
+
+TEST_CASE("integration: websocket survives rapid connect/disconnect churn") {
+    Server s;
+    // 回归：客户端在升级完成后立刻断开，读线程可能先于 handleUpgrade 的句柄赋值结束，
+    // 曾导致 joinable 线程随 Connection 析构而 std::terminate
+    for (int i = 0; i < 40; ++i) {
+        WsClient ws(s.port);
+        REQUIRE(ws.upgraded);
+        if (i % 2 == 0) {
+            // 一半连接发送 close 帧，另一半直接关闭 TCP
+            std::string frame;
+            frame.push_back(static_cast<char>(0x88));
+            frame.push_back(static_cast<char>(0x80));
+            frame.append("\x12\x34\x56\x78", 4);
+            ws.c.sendAll(frame);
+        }
+    }
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (s.hub.getWebSocketServer().connectionCount() > 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK_EQ(s.hub.getWebSocketServer().connectionCount(), static_cast<size_t>(0));
+    // 服务仍然正常：新的连接与请求都能被处理
+    WsClient again(s.port);
+    REQUIRE(again.upgraded);
+    std::string payload;
+    REQUIRE(again.readText(payload, 3000));
+    CHECK_EQ(Json::parse(payload)["type"].asString(), std::string("welcome"));
+    CHECK_EQ(request(s.port, "GET", "/api/v1/status").status, 200);
 }
 
 TEST_CASE("integration: keep-alive, concurrency and large bodies") {
