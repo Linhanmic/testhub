@@ -4,6 +4,7 @@
 
 #include "../testhub.h"
 #include "../model/json_convert.h"
+#include "../report/report_writer.h"
 #include "../util/logger.h"
 #include "../util/string_util.h"
 
@@ -153,6 +154,24 @@ void TestHub::registerApiRoutes() {
         Json j = toJson(record->result);
         j["request"] = toJson(record->request);
         return HttpResponse::json(200, j);
+    });
+
+    http.get("/api/v1/tests/{id}/report", [this](const HttpRequest& req) {
+        std::string id = req.param("id");
+        ReportFormat format;
+        if (!parseReportFormat(req.query("format"), format)) {
+            return HttpResponse::error(400, "Unsupported report format '" + req.query("format") + "' (expected junit or html)");
+        }
+        auto record = engine_->getRecord(id);
+        if (!record) return HttpResponse::error(404, "Test not found: " + id);
+        if (!record->hasResult) {
+            return HttpResponse::error(409, "Test has not finished yet (state '" + testStateToString(record->status.state) + "')");
+        }
+        HttpResponse r = HttpResponse::text(200, ReportWriter::render(*record, format), reportContentType(format));
+        if (parseBool(req.query("download"))) {
+            r.headers["Content-Disposition"] = "attachment; filename=\"" + id + "." + reportFileExtension(format) + "\"";
+        }
+        return r;
     });
 
     http.get("/api/v1/tests/{id}/events", [this](const HttpRequest& req) {
