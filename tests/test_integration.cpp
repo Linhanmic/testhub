@@ -202,24 +202,36 @@ struct WsClient {
 // 服务器夹具
 // ------------------------------------------------------------
 
+std::string makeTempDir(const char* prefix) {
+    std::string dir = (fs::temp_directory_path() / (std::string(prefix) + std::to_string(::getpid()) + "-" +
+                                                    std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))).string();
+    fs::create_directories(dir);
+    return dir;
+}
+
 struct Server {
     std::string specsDir;
+    std::string resultsDir;
+    bool ownsResultsDir = true;
     TestHub hub;
     int port = 0;
 
-    Server() {
-        specsDir = (fs::temp_directory_path() / ("testhub-it-" + std::to_string(::getpid()) + "-" +
-                                                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))).string();
+    // resultsDir 为空时使用新的临时目录；传入已有目录可模拟重启后回放历史
+    explicit Server(const std::string& existingResultsDir = "") {
+        specsDir = makeTempDir("testhub-it-");
         fs::create_directories(specsDir + "/concepts");
         for (const auto& name : {"login.spec", "calculator.spec", "checkout.spec"}) {
             fs::copy_file(std::string(TESTHUB_SOURCE_DIR) + "/specs/" + name, specsDir + "/" + name);
         }
         fs::copy_file(std::string(TESTHUB_SOURCE_DIR) + "/specs/concepts/auth.cpt", specsDir + "/concepts/auth.cpt");
+        if (existingResultsDir.empty()) resultsDir = makeTempDir("testhub-results-");
+        else { resultsDir = existingResultsDir; ownsResultsDir = false; }
 
         TestHubConfig cfg;
         cfg.host = "127.0.0.1";
         cfg.port = 0;
         cfg.specsDir = specsDir;
+        cfg.resultsDir = resultsDir;
         cfg.runnerLanguage = "mock";
         cfg.logLevel = "warn";
         cfg.logRequests = false;
@@ -232,6 +244,7 @@ struct Server {
         hub.stop();
         std::error_code ec;
         fs::remove_all(specsDir, ec);
+        if (ownsResultsDir) fs::remove_all(resultsDir, ec);
     }
 
     Json waitForTerminal(const std::string& id, int timeoutMs = 10000) {
@@ -479,4 +492,60 @@ TEST_CASE("integration: cancel a running test via API") {
     CHECK_EQ(queue["size"].asInt(), 0);
     Json runner = request(s.port, "GET", "/api/v1/runner/status").json();
     CHECK_EQ(runner["language"].asString(), std::string("mock"));
+}
+
+TEST_CASE("integration: results persist across server restarts") {
+    std::string resultsDir;
+    std::string id;
+    {
+        Server s;
+        resultsDir = s.resultsDir;
+        s.ownsResultsDir = false;
+        HttpResult submit = request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["calculator.spec"],"name":"persisted run","tags":["unit"]})");
+        REQUIRE_EQ(submit.status, 202);
+        id = submit.json()["test_id"].asString();
+        Json st = s.waitForTerminal(id);
+        CHECK_EQ(st["state"].asString(), std::string("passed"));
+        CHECK(fs::exists(resultsDir + "/" + id + ".json"));
+
+        // 删除记录同时删除文件
+        HttpResult other = request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["login.spec"]})");
+        std::string otherId = other.json()["test_id"].asString();
+        s.waitForTerminal(otherId);
+        CHECK(fs::exists(resultsDir + "/" + otherId + ".json"));
+        CHECK_EQ(request(s.port, "DELETE", "/api/v1/tests/" + otherId).status, 200);
+        CHECK(!fs::exists(resultsDir + "/" + otherId + ".json"));
+    }
+    {
+        Server restarted(resultsDir);
+        HttpResult list = request(restarted.port, "GET", "/api/v1/tests");
+        REQUIRE_EQ(list.status, 200);
+        CHECK_EQ(list.json()["total"].asInt(), 1);
+        CHECK_EQ(list.json()["tests"][0]["test_id"].asString(), id);
+        CHECK_EQ(list.json()["tests"][0]["name"].asString(), std::string("persisted run"));
+
+        HttpResult status = request(restarted.port, "GET", "/api/v1/tests/" + id);
+        CHECK_EQ(status.status, 200);
+        CHECK_EQ(status.json()["state"].asString(), std::string("passed"));
+        CHECK_EQ(status.json()["request"]["tags"][0].asString(), std::string("unit"));
+
+        HttpResult result = request(restarted.port, "GET", "/api/v1/tests/" + id + "/result");
+        REQUIRE_EQ(result.status, 200);
+        CHECK_EQ(result.json()["specs"][0]["file"].asString(), std::string("calculator.spec"));
+        CHECK_EQ(result.json()["specs"][0]["scenarios"].asArray().size(), static_cast<size_t>(6));
+        CHECK_EQ(result.json()["specs"][0]["scenarios"][0]["data_row"]["a"].asString(), std::string("1"));
+
+        Json stats = request(restarted.port, "GET", "/api/v1/status").json();
+        CHECK(stats["stats"]["passed"].asInt() >= 1);
+
+        // 重跑历史记录仍然可用
+        HttpResult rerun = request(restarted.port, "POST", "/api/v1/tests/" + id + "/rerun", "{}");
+        CHECK_EQ(rerun.status, 202);
+        restarted.waitForTerminal(rerun.json()["test_id"].asString());
+
+        CHECK_EQ(request(restarted.port, "DELETE", "/api/v1/tests").status, 200);
+        CHECK(!fs::exists(resultsDir + "/" + id + ".json"));
+    }
+    std::error_code ec;
+    fs::remove_all(resultsDir, ec);
 }

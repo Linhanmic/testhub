@@ -3,6 +3,7 @@
 #include "util/file_util.h"
 
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <thread>
 #include <unistd.h>
@@ -139,7 +140,10 @@ TEST_CASE("engine: tag filter selects scenarios") {
     std::string id2 = h.engine.submit(none);
     TestStatus st2 = h.waitFor(id2);
     CHECK_EQ(st2.totalScenarios, 0);
-    CHECK(isTerminalState(st2.state));
+    // 没有场景匹配不能算通过
+    CHECK(st2.state == TestState::SKIPPED);
+    REQUIRE(!st2.warnings.empty());
+    CHECK(st2.warnings.back().find("No scenarios matched") != std::string::npos);
 }
 
 TEST_CASE("engine: data driven spec runs one scenario per row") {
@@ -273,4 +277,171 @@ TEST_CASE("engine: concurrent workers execute in parallel") {
     for (const auto& id : ids) CHECK(h.waitFor(id).state == TestState::PASSED);
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     CHECK_MSG(ms < 500, "took " + std::to_string(ms) + "ms; expected parallel execution");
+}
+
+TEST_CASE("store: record round-trips through JSON and files") {
+    TempSpecs dir;
+    ResultStore store(dir.dir + "/results");
+    REQUIRE(store.enabled());
+    REQUIRE(store.prepare());
+
+    TestRecord rec;
+    rec.request.id = "test-1";
+    rec.request.name = "round trip";
+    rec.request.specFiles = {"a.spec"};
+    rec.request.tags = {"smoke & !slow"};
+    rec.request.metadata["build"] = "42";
+    rec.status.testId = "test-1";
+    rec.status.state = TestState::FAILED;
+    rec.status.totalScenarios = 2;
+    rec.status.executedScenarios = 2;
+    rec.status.failedScenarios = 1;
+    rec.status.passedScenarios = 1;
+    rec.status.progress = 1.0;
+    rec.status.submitTime = TimeUtil::fromIso8601("2026-09-10T14:00:00.123Z");
+    rec.status.endTime = TimeUtil::fromIso8601("2026-09-10T14:00:05.000Z");
+    rec.resolvedSpecs = {"/abs/a.spec"};
+    rec.hasResult = true;
+    rec.result.testId = "test-1";
+    rec.result.finalState = TestState::FAILED;
+    rec.result.totalDuration = 4.877;
+    rec.result.errors = {"boom"};
+    SpecResult sr;
+    sr.specFile = "a.spec";
+    sr.specName = "A";
+    sr.state = TestState::FAILED;
+    ScenarioResult sc;
+    sc.scenarioName = "row";
+    sc.state = TestState::FAILED;
+    sc.dataRowIndex = 1;
+    sc.dataRow = {{"x", "2"}};
+    sc.lineNumber = 7;
+    StepResult st;
+    st.stepText = "do <x>";
+    st.parameterizedText = "do {}";
+    st.state = TestState::FAILED;
+    st.errorMessage = "expected 1";
+    st.stackTrace = "trace";
+    st.messages = {"m1", "m2"};
+    st.duration = 0.25;
+    StepResult conceptStep;
+    conceptStep.stepText = "login";
+    conceptStep.isConcept = true;
+    conceptStep.conceptSteps.push_back(st);
+    sc.stepResults = {conceptStep, st};
+    sc.teardownSteps = {st};
+    sr.scenarioResults.push_back(sc);
+    rec.result.specResults.push_back(sr);
+
+    CHECK(store.save(rec));
+    CHECK(fs::exists(dir.dir + "/results/test-1.json"));
+    // 损坏文件与非 JSON 文件应被跳过
+    FileUtil::writeFile(dir.dir + "/results/broken.json", "{not json");
+    FileUtil::writeFile(dir.dir + "/results/notes.txt", "ignored");
+
+    std::vector<TestRecord> loaded = store.loadAll();
+    REQUIRE_EQ(loaded.size(), static_cast<size_t>(1));
+    const TestRecord& r = loaded[0];
+    CHECK_EQ(r.request.id, std::string("test-1"));
+    CHECK_EQ(r.request.name, std::string("round trip"));
+    CHECK_EQ(r.request.tags[0], std::string("smoke & !slow"));
+    CHECK_EQ(r.request.metadata.at("build"), std::string("42"));
+    CHECK(r.status.state == TestState::FAILED);
+    CHECK_EQ(r.status.totalScenarios, 2);
+    CHECK_EQ(TimeUtil::toIso8601(r.status.submitTime), std::string("2026-09-10T14:00:00.123Z"));
+    CHECK_EQ(TimeUtil::toIso8601(r.status.endTime), std::string("2026-09-10T14:00:05.000Z"));
+    CHECK_EQ(r.resolvedSpecs[0], std::string("/abs/a.spec"));
+    REQUIRE(r.hasResult);
+    CHECK(r.result.finalState == TestState::FAILED);
+    CHECK(std::abs(r.result.totalDuration - 4.877) < 1e-9);
+    CHECK_EQ(r.result.errors[0], std::string("boom"));
+    REQUIRE_EQ(r.result.specResults.size(), static_cast<size_t>(1));
+    const ScenarioResult& lsc = r.result.specResults[0].scenarioResults[0];
+    CHECK_EQ(lsc.dataRowIndex, 1);
+    CHECK_EQ(lsc.dataRow.at("x"), std::string("2"));
+    CHECK_EQ(lsc.lineNumber, 7);
+    REQUIRE_EQ(lsc.stepResults.size(), static_cast<size_t>(2));
+    CHECK(lsc.stepResults[0].isConcept);
+    REQUIRE_EQ(lsc.stepResults[0].conceptSteps.size(), static_cast<size_t>(1));
+    CHECK_EQ(lsc.stepResults[0].conceptSteps[0].errorMessage, std::string("expected 1"));
+    CHECK_EQ(lsc.stepResults[1].messages.size(), static_cast<size_t>(2));
+    CHECK_EQ(lsc.stepResults[1].stackTrace, std::string("trace"));
+    CHECK_EQ(lsc.teardownSteps.size(), static_cast<size_t>(1));
+
+    CHECK(store.remove("test-1"));
+    CHECK(!fs::exists(dir.dir + "/results/test-1.json"));
+    CHECK(!store.remove("test-1"));
+    CHECK(!store.save(TestRecord{}));          // 空 ID 被拒绝
+    TestRecord evil;
+    evil.status.testId = "../escape";
+    CHECK(!store.save(evil));
+    CHECK_EQ(store.clear(), static_cast<size_t>(1)); // broken.json
+
+    ResultStore disabled;
+    CHECK(!disabled.enabled());
+    CHECK(!disabled.save(rec));
+    CHECK(disabled.loadAll().empty());
+}
+
+TEST_CASE("store: engine reloads persisted history on start and trims it") {
+    TempSpecs specs;
+    specs.write("pass.spec", kPassing);
+    std::string resultsDir = specs.dir + "/results";
+    std::string firstId, secondId;
+    {
+        spec::SpecRepository repo;
+        repo.configure(specs.dir, "");
+        RunnerBridge bridge;
+        RunnerConfig rc;
+        rc.language = "mock";
+        bridge.start(rc);
+        ExecutionEngine engine(repo, bridge);
+        EngineConfig ec;
+        ec.resultsDir = resultsDir;
+        engine.configure(ec);
+        engine.start();
+        TestRequest req;
+        req.specFiles = {"pass.spec"};
+        req.name = "first";
+        firstId = engine.submit(req);
+        req.name = "second";
+        secondId = engine.submit(req);
+        for (const auto& id : {firstId, secondId}) {
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (std::chrono::steady_clock::now() < deadline) {
+                auto st = engine.getStatus(id);
+                if (st && isTerminalState(st->state)) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+        engine.stop();
+        bridge.stopRunner();
+    }
+    CHECK(fs::exists(resultsDir + "/" + firstId + ".json"));
+    CHECK(fs::exists(resultsDir + "/" + secondId + ".json"));
+    {
+        spec::SpecRepository repo;
+        repo.configure(specs.dir, "");
+        RunnerBridge bridge;
+        RunnerConfig rc;
+        rc.language = "mock";
+        bridge.start(rc);
+        ExecutionEngine engine(repo, bridge);
+        EngineConfig ec;
+        ec.resultsDir = resultsDir;
+        ec.historyLimit = 1;   // 回放后只保留最新一条，最旧的文件应被清理
+        engine.configure(ec);
+        engine.start();
+        CHECK_EQ(engine.count(), static_cast<size_t>(1));
+        CHECK(!engine.exists(firstId));
+        CHECK(engine.exists(secondId));
+        CHECK(!fs::exists(resultsDir + "/" + firstId + ".json"));
+        auto result = engine.getResult(secondId);
+        REQUIRE(result.has_value());
+        CHECK(result->finalState == TestState::PASSED);
+        CHECK_EQ(engine.list()[0].name, std::string("second"));
+        CHECK(engine.stats().passed >= 1);
+        engine.stop();
+        bridge.stopRunner();
+    }
 }
