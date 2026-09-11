@@ -9,7 +9,10 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <map>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
 
 namespace testhub {
 
@@ -24,6 +27,8 @@ TestState aggregateState(int failed, int errored, int skipped, int total, bool c
     if (total > 0 && skipped == total) return TestState::SKIPPED;
     return TestState::PASSED;
 }
+
+thread_local int tlsStream = -1;
 
 } // namespace
 
@@ -438,31 +443,59 @@ void ExecutionEngine::workerLoop() {
 }
 
 bool ExecutionEngine::checkTimeout(RunContext& ctx) {
-    if (ctx.timedOut) return true;
+    if (ctx.timedOut.load()) return true;
     if (std::chrono::steady_clock::now() >= ctx.deadline) {
-        ctx.timedOut = true;
-        ctx.result.errors.push_back("Test timed out");
+        bool already = false;
+        {
+            std::lock_guard<std::recursive_mutex> lock(ctx.runMutex);
+            already = ctx.timedOut.exchange(true);
+            if (!already) ctx.result.errors.push_back("Test timed out");
+        }
         return true;
     }
     return false;
 }
 
 void ExecutionEngine::updateStatus(const RunContext& ctx) {
+    TestStatus snap;
+    {
+        std::lock_guard<std::recursive_mutex> run(ctx.runMutex);
+        snap = ctx.status;
+    }
     {
         std::lock_guard<std::mutex> lock(recordsMutex_);
         auto it = records_.find(ctx.testId);
-        if (it != records_.end()) it->second.status = ctx.status;
+        if (it != records_.end()) it->second.status = snap;
     }
     publish(EventType::TEST_PROGRESS, ctx.testId, {
-        {"progress", std::to_string(ctx.status.progress)},
-        {"current_spec", ctx.status.currentSpec},
-        {"current_scenario", ctx.status.currentScenario},
-        {"current_step", ctx.status.currentStep},
-        {"executed_scenarios", std::to_string(ctx.status.executedScenarios)},
-        {"total_scenarios", std::to_string(ctx.status.totalScenarios)},
-        {"passed_scenarios", std::to_string(ctx.status.passedScenarios)},
-        {"failed_scenarios", std::to_string(ctx.status.failedScenarios)}
+        {"progress", std::to_string(snap.progress)},
+        {"current_spec", snap.currentSpec},
+        {"current_scenario", snap.currentScenario},
+        {"current_step", snap.currentStep},
+        {"executed_scenarios", std::to_string(snap.executedScenarios)},
+        {"total_scenarios", std::to_string(snap.totalScenarios)},
+        {"passed_scenarios", std::to_string(snap.passedScenarios)},
+        {"failed_scenarios", std::to_string(snap.failedScenarios)}
     });
+}
+
+void ExecutionEngine::applyScenarioOutcome(RunContext& ctx, const ScenarioResult& sr) {
+    std::lock_guard<std::recursive_mutex> lock(ctx.runMutex);
+    switch (sr.state) {
+        case TestState::PASSED: ctx.status.passedScenarios++; ctx.status.executedScenarios++; break;
+        case TestState::FAILED: ctx.status.failedScenarios++; ctx.status.executedScenarios++; break;
+        case TestState::TEST_ERROR: ctx.status.failedScenarios++; ctx.status.executedScenarios++; break;
+        case TestState::CANCELLED: ctx.status.skippedScenarios++; break;
+        default: ctx.status.skippedScenarios++; break;
+    }
+    int processed = ctx.status.executedScenarios + ctx.status.skippedScenarios;
+    if (ctx.status.totalScenarios > 0) {
+        ctx.status.progress = std::min(1.0, static_cast<double>(processed) / ctx.status.totalScenarios);
+    }
+    if (ctx.request.failFast && (sr.state == TestState::FAILED || sr.state == TestState::TEST_ERROR)) {
+        ctx.failFastTriggered.store(true);
+    }
+    updateStatus(ctx);
 }
 
 std::vector<std::string> ExecutionEngine::effectiveTags(const spec::Specification& s, const spec::Scenario& sc) {
@@ -547,30 +580,15 @@ void ExecutionEngine::execute(const TestTask& task) {
         ctx.status = it->second.status;
     }
 
-    // 整个测试独占 Runner 池中的一个 Runner 进程：suite/spec 钩子与所有场景都落在同一进程上，
-    // 不同测试则在不同进程上真正并行；池中没有空闲 Runner 时在此等待（状态仍为 queued）
-    RunnerBridge::Session session = runner_.acquireSession();
-
+    // 先解析规范（不占用 Runner），再按 parallel_streams 原子预约槽位。
+    // 预约期间状态仍为 queued，避免"先拿 1 个再等其余"造成的池死锁。
     int timeoutMs = ctx.request.timeoutMs > 0 ? ctx.request.timeoutMs : config_.defaultTimeoutMs;
     ctx.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     ctx.tagFilter = TagFilter::all(ctx.request.tags);
 
-    ctx.status.state = TestState::RUNNING;
-    ctx.status.startTime = TimeUtil::now();
-    ctx.status.totalSpecs = static_cast<int>(resolved.size());
-    ctx.result.testId = ctx.testId;
-    ctx.result.startTime = ctx.status.startTime;
-
-    // 预加载所有规范，统计场景总数并收集解析错误
-    struct Loaded {
-        std::string path;
-        std::shared_ptr<spec::Specification> specification;
-        std::vector<spec::ParseError> errors;
-        std::vector<spec::ParseError> warnings;
-    };
-    std::vector<Loaded> loaded;
+    std::vector<LoadedSpec> loaded;
     for (const auto& path : resolved) {
-        Loaded l;
+        LoadedSpec l;
         l.path = path;
         spec::ParseResult pr = specs_.load(path);
         l.specification = pr.specification;
@@ -585,72 +603,44 @@ void ExecutionEngine::execute(const TestTask& task) {
                 if (scenarioSelected(ctx, *l.specification, sc)) ctx.status.totalScenarios += rows;
             }
         }
-        loaded.push_back(l);
+        loaded.push_back(std::move(l));
     }
     ctx.status.warnings = ctx.result.warnings;
+    ctx.status.totalSpecs = static_cast<int>(resolved.size());
+
+    int streams = ctx.request.parallelStreams < 1 ? 1 : ctx.request.parallelStreams;
+    int cap = runner_.isConcurrencySafe() ? RunnerBridge::kMaxPoolSize : runner_.poolSize();
+    if (cap < 1) cap = 1;
+    if (streams > cap) streams = cap;
+    if (ctx.status.totalScenarios > 0 && streams > ctx.status.totalScenarios) streams = ctx.status.totalScenarios;
+    if (streams < 1) streams = 1;
+
+    std::vector<int> reserved = runner_.reserveSlots(streams);
+    if (reserved.empty()) reserved = runner_.reserveSlots(1);
+    if (static_cast<int>(reserved.size()) < streams) streams = reserved.empty() ? 1 : static_cast<int>(reserved.size());
+
+    ctx.status.state = TestState::RUNNING;
+    ctx.status.startTime = TimeUtil::now();
+    ctx.result.testId = ctx.testId;
+    ctx.result.startTime = ctx.status.startTime;
     updateStatus(ctx);
     publish(EventType::TEST_STARTED, ctx.testId, {
         {"total_specs", std::to_string(ctx.status.totalSpecs)},
         {"total_scenarios", std::to_string(ctx.status.totalScenarios)},
-        {"name", ctx.request.name}
+        {"name", ctx.request.name},
+        {"streams", std::to_string(streams)}
     });
     TH_LOG_INFO("engine", "Executing " + ctx.testId + ": " + std::to_string(ctx.status.totalSpecs) + " spec(s), " +
-                          std::to_string(ctx.status.totalScenarios) + " scenario(s)");
+                          std::to_string(ctx.status.totalScenarios) + " scenario(s), " +
+                          std::to_string(streams) + " stream(s)");
 
-    ExecutionContext suiteCtx;
-    suiteCtx.testId = ctx.testId;
-    suiteCtx.environment = config_.environment;
-    suiteCtx.environment["TESTHUB_ENVIRONMENT"] = ctx.request.environment;
-    HookResult beforeSuite = runner_.runHook(HookType::BeforeSuite, suiteCtx);
-    if (!beforeSuite.success) {
-        ctx.result.errors.push_back("before_suite hook failed: " + beforeSuite.errorMessage);
+    if (streams <= 1) {
+        RunnerBridge::Session session = reserved.empty() ? runner_.acquireSession()
+                                                         : runner_.attachReserved(reserved[0]);
+        executeSequential(ctx, loaded);
+    } else {
+        executeParallel(ctx, loaded, reserved);
     }
-
-    int passedSpecs = 0, failedSpecs = 0;
-    for (auto& l : loaded) {
-        if (ctx.shouldStop() || checkTimeout(ctx) || !beforeSuite.success) {
-            // 剩余规范标记为跳过
-            SpecResult sr;
-            sr.specFile = specs_.toRelative(l.path);
-            sr.specName = l.specification ? l.specification->heading : sr.specFile;
-            sr.state = ctx.cancelled->load() ? TestState::CANCELLED : TestState::SKIPPED;
-            sr.errorMessage = !beforeSuite.success ? "Skipped because before_suite hook failed"
-                              : ctx.timedOut ? "Skipped because the test timed out"
-                              : ctx.failFastTriggered ? "Skipped due to fail_fast" : "Skipped because the test was cancelled";
-            ctx.result.specResults.push_back(sr);
-            continue;
-        }
-        ctx.status.currentSpec = specs_.toRelative(l.path);
-        ctx.status.currentScenario.clear();
-        ctx.status.currentStep.clear();
-        updateStatus(ctx);
-
-        SpecResult sr;
-        if (!l.specification || !l.errors.empty()) {
-            sr.specFile = specs_.toRelative(l.path);
-            sr.specName = l.specification ? l.specification->heading : sr.specFile;
-            sr.state = TestState::TEST_ERROR;
-            std::vector<std::string> msgs;
-            for (const auto& e : l.errors) {
-                msgs.push_back(e.fileName + ":" + std::to_string(e.lineNumber) + ": " + e.message);
-            }
-            sr.errorMessage = msgs.empty() ? "Failed to load spec" : StringUtil::join(msgs, "\n");
-            ctx.result.errors.push_back(sr.errorMessage);
-            publish(EventType::SPEC_COMPLETED, ctx.testId, {{"spec", sr.specFile}, {"state", "error"}, {"error", sr.errorMessage}});
-        } else {
-            sr = executeSpec(ctx, *l.specification);
-        }
-        ctx.result.specResults.push_back(sr);
-        if (sr.state == TestState::PASSED || sr.state == TestState::SKIPPED) passedSpecs++;
-        else if (sr.state != TestState::CANCELLED) failedSpecs++;
-        ctx.status.executedSpecs++;
-        ctx.status.passedSpecs = passedSpecs;
-        ctx.status.failedSpecs = failedSpecs;
-        updateStatus(ctx);
-    }
-
-    HookResult afterSuite = runner_.runHook(HookType::AfterSuite, suiteCtx);
-    if (!afterSuite.success) ctx.result.errors.push_back("after_suite hook failed: " + afterSuite.errorMessage);
 
     ctx.result.endTime = TimeUtil::now();
     ctx.result.totalDuration = std::chrono::duration<double>(ctx.result.endTime - ctx.result.startTime).count();
@@ -659,13 +649,21 @@ void ExecutionEngine::execute(const TestTask& task) {
     ctx.result.failedScenarios = ctx.status.failedScenarios;
     ctx.result.skippedScenarios = ctx.status.skippedScenarios;
 
-    int erroredSpecs = 0;
-    for (const auto& s : ctx.result.specResults) if (s.state == TestState::TEST_ERROR) erroredSpecs++;
+    int passedSpecs = 0, failedSpecs = 0, erroredSpecs = 0;
+    bool suiteFailed = false;
+    for (const auto& e : ctx.result.errors) {
+        if (e.find("before_suite") != std::string::npos) suiteFailed = true;
+    }
+    for (const auto& s : ctx.result.specResults) {
+        if (s.state == TestState::TEST_ERROR) erroredSpecs++;
+        if (s.state == TestState::PASSED || s.state == TestState::SKIPPED) passedSpecs++;
+        else if (s.state != TestState::CANCELLED) failedSpecs++;
+    }
     if (ctx.cancelled->load()) {
         ctx.result.finalState = TestState::CANCELLED;
-    } else if (ctx.timedOut) {
+    } else if (ctx.timedOut.load()) {
         ctx.result.finalState = TestState::TEST_ERROR;
-    } else if (!beforeSuite.success) {
+    } else if (suiteFailed) {
         ctx.result.finalState = TestState::TEST_ERROR;
     } else {
         ctx.result.finalState = aggregateState(failedSpecs - erroredSpecs, erroredSpecs,
@@ -742,6 +740,280 @@ void ExecutionEngine::execute(const TestTask& task) {
                           std::to_string(ctx.result.totalScenarios) + " scenarios passed)");
 }
 
+void ExecutionEngine::executeSequential(RunContext& ctx, std::vector<LoadedSpec>& loaded) {
+    ExecutionContext suiteCtx;
+    suiteCtx.testId = ctx.testId;
+    suiteCtx.environment = config_.environment;
+    suiteCtx.environment["TESTHUB_ENVIRONMENT"] = ctx.request.environment;
+    HookResult beforeSuite = runner_.runHook(HookType::BeforeSuite, suiteCtx);
+    if (!beforeSuite.success) {
+        std::lock_guard<std::recursive_mutex> lock(ctx.runMutex);
+        ctx.result.errors.push_back("before_suite hook failed: " + beforeSuite.errorMessage);
+    }
+
+    int passedSpecs = 0, failedSpecs = 0;
+    for (auto& l : loaded) {
+        if (ctx.shouldStop() || checkTimeout(ctx) || !beforeSuite.success) {
+            SpecResult sr;
+            sr.specFile = specs_.toRelative(l.path);
+            sr.specName = l.specification ? l.specification->heading : sr.specFile;
+            sr.state = ctx.cancelled->load() ? TestState::CANCELLED : TestState::SKIPPED;
+            sr.errorMessage = !beforeSuite.success ? "Skipped because before_suite hook failed"
+                              : ctx.timedOut.load() ? "Skipped because the test timed out"
+                              : ctx.failFastTriggered.load() ? "Skipped due to fail_fast" : "Skipped because the test was cancelled";
+            ctx.result.specResults.push_back(sr);
+            continue;
+        }
+        {
+            std::lock_guard<std::recursive_mutex> lock(ctx.runMutex);
+            ctx.status.currentSpec = specs_.toRelative(l.path);
+            ctx.status.currentScenario.clear();
+            ctx.status.currentStep.clear();
+        }
+        updateStatus(ctx);
+
+        SpecResult sr;
+        if (!l.specification || !l.errors.empty()) {
+            sr.specFile = specs_.toRelative(l.path);
+            sr.specName = l.specification ? l.specification->heading : sr.specFile;
+            sr.state = TestState::TEST_ERROR;
+            std::vector<std::string> msgs;
+            for (const auto& e : l.errors) {
+                msgs.push_back(e.fileName + ":" + std::to_string(e.lineNumber) + ": " + e.message);
+            }
+            sr.errorMessage = msgs.empty() ? "Failed to load spec" : StringUtil::join(msgs, "\n");
+            ctx.result.errors.push_back(sr.errorMessage);
+            publish(EventType::SPEC_COMPLETED, ctx.testId, {{"spec", sr.specFile}, {"state", "error"}, {"error", sr.errorMessage}});
+        } else {
+            sr = executeSpec(ctx, *l.specification);
+        }
+        ctx.result.specResults.push_back(sr);
+        if (sr.state == TestState::PASSED || sr.state == TestState::SKIPPED) passedSpecs++;
+        else if (sr.state != TestState::CANCELLED) failedSpecs++;
+        ctx.status.executedSpecs++;
+        ctx.status.passedSpecs = passedSpecs;
+        ctx.status.failedSpecs = failedSpecs;
+        updateStatus(ctx);
+    }
+
+    HookResult afterSuite = runner_.runHook(HookType::AfterSuite, suiteCtx);
+    if (!afterSuite.success) {
+        std::lock_guard<std::recursive_mutex> lock(ctx.runMutex);
+        ctx.result.errors.push_back("after_suite hook failed: " + afterSuite.errorMessage);
+    }
+}
+
+void ExecutionEngine::executeParallel(RunContext& ctx, std::vector<LoadedSpec>& loaded, const std::vector<int>& slots) {
+    struct Work {
+        size_t specIndex = 0;
+        const spec::Scenario* scenario = nullptr;
+        int row = -1;
+        size_t order = 0;
+    };
+
+    std::vector<Work> items;
+    std::vector<SpecResult> specResults(loaded.size());
+    for (size_t i = 0; i < loaded.size(); ++i) {
+        auto& l = loaded[i];
+        specResults[i].specFile = specs_.toRelative(l.path);
+        specResults[i].specName = l.specification ? l.specification->heading : specResults[i].specFile;
+        if (l.specification) specResults[i].tags = l.specification->tags;
+        if (!l.specification || !l.errors.empty()) {
+            specResults[i].state = TestState::TEST_ERROR;
+            std::vector<std::string> msgs;
+            for (const auto& e : l.errors) {
+                msgs.push_back(e.fileName + ":" + std::to_string(e.lineNumber) + ": " + e.message);
+            }
+            specResults[i].errorMessage = msgs.empty() ? "Failed to load spec" : StringUtil::join(msgs, "\n");
+            std::lock_guard<std::recursive_mutex> lock(ctx.runMutex);
+            ctx.result.errors.push_back(specResults[i].errorMessage);
+            publish(EventType::SPEC_COMPLETED, ctx.testId,
+                    {{"spec", specResults[i].specFile}, {"state", "error"}, {"error", specResults[i].errorMessage}});
+            continue;
+        }
+        int rows = l.specification->isDataDriven() ? static_cast<int>(l.specification->dataTable.rowCount()) : 1;
+        for (int row = 0; row < rows; ++row) {
+            for (const auto& scenario : l.specification->scenarios) {
+                if (!scenarioSelected(ctx, *l.specification, scenario)) continue;
+                Work w;
+                w.specIndex = i;
+                w.scenario = &scenario;
+                w.row = l.specification->isDataDriven() ? row : -1;
+                w.order = items.size();
+                items.push_back(w);
+            }
+        }
+    }
+
+    const int n = static_cast<int>(slots.size());
+    std::vector<std::vector<Work>> buckets(static_cast<size_t>(n));
+    for (size_t i = 0; i < items.size(); ++i) buckets[i % static_cast<size_t>(n)].push_back(items[i]);
+
+    std::vector<std::vector<std::pair<size_t, ScenarioResult>>> collected(loaded.size());
+    std::mutex collectMutex;
+    std::vector<std::string> specHookErrors(loaded.size());
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<size_t>(n));
+
+    for (int stream = 0; stream < n; ++stream) {
+        threads.emplace_back([this, &ctx, &loaded, &slots, &buckets, &collected, &collectMutex, &specHookErrors, stream] {
+            tlsStream = stream;
+            RunnerBridge::Session session = runner_.attachReserved(slots[static_cast<size_t>(stream)]);
+            ExecutionContext suiteCtx;
+            suiteCtx.testId = ctx.testId;
+            suiteCtx.environment = config_.environment;
+            suiteCtx.environment["TESTHUB_ENVIRONMENT"] = ctx.request.environment;
+            HookResult beforeSuite = runner_.runHook(HookType::BeforeSuite, suiteCtx);
+            if (!beforeSuite.success) {
+                std::lock_guard<std::recursive_mutex> lock(ctx.runMutex);
+                ctx.result.errors.push_back("before_suite hook failed on stream " + std::to_string(stream) +
+                                            ": " + beforeSuite.errorMessage);
+            }
+
+            // 按规范下标分组，保持每个流上 before_spec → 场景 → after_spec 的 Gauge 语义
+            std::map<size_t, std::vector<Work>> bySpec;
+            for (const auto& w : buckets[static_cast<size_t>(stream)]) bySpec[w.specIndex].push_back(w);
+
+            for (auto& kv : bySpec) {
+                size_t specIndex = kv.first;
+                const LoadedSpec& l = loaded[specIndex];
+                if (!l.specification) continue;
+                if (beforeSuite.success == false) {
+                    for (const auto& w : kv.second) {
+                        ScenarioResult sr;
+                        sr.scenarioName = w.scenario->name;
+                        sr.tags = effectiveTags(*l.specification, *w.scenario);
+                        sr.lineNumber = w.scenario->lineNumber;
+                        sr.dataRowIndex = w.row;
+                        sr.state = TestState::SKIPPED;
+                        sr.errorMessage = "Skipped because before_suite hook failed";
+                        applyScenarioOutcome(ctx, sr);
+                        std::lock_guard<std::mutex> lock(collectMutex);
+                        collected[specIndex].push_back({w.order, std::move(sr)});
+                    }
+                    continue;
+                }
+
+                ExecutionContext specCtx;
+                specCtx.testId = ctx.testId;
+                specCtx.specFile = l.specification->fileName;
+                specCtx.specName = l.specification->heading;
+                specCtx.tags = l.specification->tags;
+                specCtx.environment = config_.environment;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(ctx.runMutex);
+                    ctx.status.currentSpec = l.specification->fileName;
+                }
+                publish(EventType::SPEC_STARTED, ctx.testId, {
+                    {"spec", l.specification->fileName},
+                    {"name", l.specification->heading},
+                    {"stream", std::to_string(stream)},
+                    {"scenarios", std::to_string(kv.second.size())},
+                    {"tags", joinTags(l.specification->tags)}
+                });
+                HookResult beforeSpec = runner_.runHook(HookType::BeforeSpec, specCtx);
+                if (!beforeSpec.success) {
+                    std::lock_guard<std::mutex> lock(collectMutex);
+                    if (specHookErrors[specIndex].empty()) {
+                        specHookErrors[specIndex] = "before_spec hook failed: " + beforeSpec.errorMessage;
+                    }
+                }
+                for (const auto& w : kv.second) {
+                    ScenarioResult sr;
+                    if (!beforeSpec.success || ctx.shouldStop() || checkTimeout(ctx)) {
+                        sr.scenarioName = w.scenario->name;
+                        sr.tags = effectiveTags(*l.specification, *w.scenario);
+                        sr.lineNumber = w.scenario->lineNumber;
+                        sr.dataRowIndex = w.row;
+                        sr.state = ctx.cancelled->load() ? TestState::CANCELLED : TestState::SKIPPED;
+                        if (!beforeSpec.success) sr.errorMessage = "Skipped because before_spec hook failed";
+                        else if (ctx.cancelled->load()) sr.errorMessage = "Skipped because the test was cancelled";
+                        else if (ctx.timedOut.load()) sr.errorMessage = "Skipped because the test timed out";
+                        else sr.errorMessage = "Skipped due to fail_fast";
+                    } else {
+                        {
+                            std::lock_guard<std::recursive_mutex> lock(ctx.runMutex);
+                            ctx.status.currentScenario = w.scenario->name;
+                        }
+                        sr = executeScenario(ctx, *l.specification, *w.scenario, w.row);
+                    }
+                    applyScenarioOutcome(ctx, sr);
+                    std::lock_guard<std::mutex> lock(collectMutex);
+                    collected[specIndex].push_back({w.order, std::move(sr)});
+                }
+                HookResult afterSpec = runner_.runHook(HookType::AfterSpec, specCtx);
+                if (!afterSpec.success) {
+                    std::lock_guard<std::mutex> lock(collectMutex);
+                    specHookErrors[specIndex] += std::string(specHookErrors[specIndex].empty() ? "" : "\n") +
+                                                 "after_spec hook failed: " + afterSpec.errorMessage;
+                }
+            }
+
+            HookResult afterSuite = runner_.runHook(HookType::AfterSuite, suiteCtx);
+            if (!afterSuite.success) {
+                std::lock_guard<std::recursive_mutex> lock(ctx.runMutex);
+                ctx.result.errors.push_back("after_suite hook failed on stream " + std::to_string(stream) +
+                                            ": " + afterSuite.errorMessage);
+            }
+            tlsStream = -1;
+        });
+    }
+    for (auto& t : threads) t.join();
+
+    int passedSpecs = 0, failedSpecs = 0;
+    for (size_t i = 0; i < loaded.size(); ++i) {
+        SpecResult& sr = specResults[i];
+        if (sr.state != TestState::TEST_ERROR) {
+            std::sort(collected[i].begin(), collected[i].end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
+            int failed = 0, errored = 0, skipped = 0, passed = 0;
+            double specDur = 0;
+            for (auto& item : collected[i]) {
+                switch (item.second.state) {
+                    case TestState::PASSED: passed++; break;
+                    case TestState::FAILED: failed++; break;
+                    case TestState::TEST_ERROR: errored++; break;
+                    default: skipped++; break;
+                }
+                if (item.second.duration > specDur) specDur = item.second.duration;
+                sr.scenarioResults.push_back(std::move(item.second));
+            }
+            sr.totalScenarios = static_cast<int>(sr.scenarioResults.size());
+            sr.passedScenarios = passed;
+            sr.failedScenarios = failed + errored;
+            sr.skippedScenarios = skipped;
+            if (!specHookErrors[i].empty()) {
+                sr.errorMessage = specHookErrors[i];
+                sr.state = TestState::TEST_ERROR;
+            } else if (sr.totalScenarios == 0) {
+                sr.state = TestState::SKIPPED;
+            } else {
+                sr.state = aggregateState(failed, errored, skipped, sr.totalScenarios,
+                                          ctx.cancelled->load() && (passed + failed + errored) == 0);
+            }
+            sr.duration = specDur;
+            publish(EventType::SPEC_COMPLETED, ctx.testId, {
+                {"spec", sr.specFile},
+                {"name", sr.specName},
+                {"state", testStateToString(sr.state)},
+                {"duration", std::to_string(sr.duration)},
+                {"total_scenarios", std::to_string(sr.totalScenarios)},
+                {"passed_scenarios", std::to_string(sr.passedScenarios)},
+                {"failed_scenarios", std::to_string(sr.failedScenarios)},
+                {"skipped_scenarios", std::to_string(sr.skippedScenarios)}
+            });
+        }
+        ctx.result.specResults.push_back(std::move(sr));
+        if (ctx.result.specResults.back().state == TestState::PASSED ||
+            ctx.result.specResults.back().state == TestState::SKIPPED) passedSpecs++;
+        else if (ctx.result.specResults.back().state != TestState::CANCELLED) failedSpecs++;
+    }
+    ctx.status.executedSpecs = static_cast<int>(loaded.size());
+    ctx.status.passedSpecs = passedSpecs;
+    ctx.status.failedSpecs = failedSpecs;
+    updateStatus(ctx);
+}
+
 SpecResult ExecutionEngine::executeSpec(RunContext& ctx, const spec::Specification& specification) {
     SpecResult result;
     result.specFile = specification.fileName;
@@ -784,7 +1056,7 @@ SpecResult ExecutionEngine::executeSpec(RunContext& ctx, const spec::Specificati
                 sr.state = ctx.cancelled->load() ? TestState::CANCELLED : TestState::SKIPPED;
                 if (!beforeSpec.success) sr.errorMessage = "Skipped because before_spec hook failed";
                 else if (ctx.cancelled->load()) sr.errorMessage = "Skipped because the test was cancelled";
-                else if (ctx.timedOut) sr.errorMessage = "Skipped because the test timed out";
+                else if (ctx.timedOut.load()) sr.errorMessage = "Skipped because the test timed out";
                 else sr.errorMessage = "Skipped";
                 // 保留步骤列表（全部标记为跳过），便于结果视图展示完整场景结构
                 for (const auto& step : scenario.steps) {
@@ -801,21 +1073,12 @@ SpecResult ExecutionEngine::executeSpec(RunContext& ctx, const spec::Specificati
             }
             result.scenarioResults.push_back(sr);
             switch (sr.state) {
-                case TestState::PASSED: passed++; ctx.status.passedScenarios++; ctx.status.executedScenarios++; break;
-                case TestState::FAILED: failed++; ctx.status.failedScenarios++; ctx.status.executedScenarios++; break;
-                case TestState::TEST_ERROR: errored++; ctx.status.failedScenarios++; ctx.status.executedScenarios++; break;
-                case TestState::CANCELLED: skipped++; ctx.status.skippedScenarios++; break;
-                default: skipped++; ctx.status.skippedScenarios++; break;
+                case TestState::PASSED: passed++; break;
+                case TestState::FAILED: failed++; break;
+                case TestState::TEST_ERROR: errored++; break;
+                default: skipped++; break;
             }
-            // 进度按“已处理”（含跳过）计算，executedScenarios 只统计真正运行过的场景
-            int processed = ctx.status.executedScenarios + ctx.status.skippedScenarios;
-            if (ctx.status.totalScenarios > 0) {
-                ctx.status.progress = std::min(1.0, static_cast<double>(processed) / ctx.status.totalScenarios);
-            }
-            if (ctx.request.failFast && (sr.state == TestState::FAILED || sr.state == TestState::TEST_ERROR)) {
-                ctx.failFastTriggered = true;
-            }
-            updateStatus(ctx);
+            applyScenarioOutcome(ctx, sr);
         }
     }
 
@@ -867,6 +1130,7 @@ ScenarioResult ExecutionEngine::executeScenario(RunContext& ctx, const spec::Spe
         {"tags", joinTags(result.tags)},
         {"steps", std::to_string(scenario.steps.size())}
     };
+    if (tlsStream >= 0) eventData["stream"] = std::to_string(tlsStream);
     if (dataRowIndex >= 0) eventData["data_row"] = std::to_string(dataRowIndex);
     publish(EventType::SCENARIO_STARTED, ctx.testId, eventData);
 
@@ -928,7 +1192,7 @@ ScenarioResult ExecutionEngine::executeScenario(RunContext& ctx, const spec::Spe
         bool anySkipped = false;
         for (const auto& s : result.stepResults) if (s.state == TestState::SKIPPED) anySkipped = true;
         if (anySkipped || scenario.steps.empty()) result.state = TestState::CANCELLED;
-    } else if (ctx.timedOut && result.state == TestState::PASSED) {
+    } else if (ctx.timedOut.load() && result.state == TestState::PASSED) {
         bool anySkipped = false;
         for (const auto& s : result.stepResults) if (s.state == TestState::SKIPPED) anySkipped = true;
         if (anySkipped) {
@@ -952,7 +1216,10 @@ StepResult ExecutionEngine::executeStep(RunContext& ctx, const spec::Step& step,
     result.parameterizedText = step.parameterizedText;
     stopScenario = false;
 
-    ctx.status.currentStep = step.text;
+    {
+        std::lock_guard<std::recursive_mutex> lock(ctx.runMutex);
+        ctx.status.currentStep = step.text;
+    }
     publish(EventType::STEP_STARTED, ctx.testId, {
         {"spec", execCtx.specFile},
         {"scenario", execCtx.scenarioName},

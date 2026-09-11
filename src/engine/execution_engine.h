@@ -145,16 +145,27 @@ private:
         TagFilter tagFilter;
         TestStatus status;
         TestResult result;
-        bool timedOut = false;
-        bool failFastTriggered = false;
+        std::atomic<bool> timedOut{false};
+        std::atomic<bool> failFastTriggered{false};
+        mutable std::recursive_mutex runMutex;  // 并行流下保护 status / errors / 计数
 
         bool shouldStop() const {
-            return cancelled->load() || timedOut || failFastTriggered;
+            return cancelled->load() || timedOut.load() || failFastTriggered.load();
         }
+    };
+
+    struct LoadedSpec {
+        std::string path;
+        std::shared_ptr<spec::Specification> specification;
+        std::vector<spec::ParseError> errors;
+        std::vector<spec::ParseError> warnings;
     };
 
     void workerLoop();
     void execute(const TestTask& task);
+    void executeSequential(RunContext& ctx, std::vector<LoadedSpec>& loaded);
+    void executeParallel(RunContext& ctx, std::vector<LoadedSpec>& loaded, const std::vector<int>& slots);
+    void applyScenarioOutcome(RunContext& ctx, const ScenarioResult& sr);
     SpecResult executeSpec(RunContext& ctx, const spec::Specification& specification);
     ScenarioResult executeScenario(RunContext& ctx, const spec::Specification& specification,
                                    const spec::Scenario& scenario, int dataRowIndex);

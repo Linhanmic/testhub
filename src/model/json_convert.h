@@ -438,7 +438,12 @@ inline bool testRequestFromJson(const Json& json, TestRequest& request, std::str
     if (json["name"].isString()) request.name = json["name"].asString();
     if (json["environment"].isString()) request.environment = json["environment"].asString();
     if (json["priority"].isString()) request.priority = stringToPriority(json["priority"].asString());
-    if (json["parallel_streams"].isNumber()) request.parallelStreams = std::max(1, json["parallel_streams"].asInt());
+    if (json["parallel_streams"].isNumber()) {
+        int n = json["parallel_streams"].asInt();
+        if (n < 1) n = 1;
+        if (n > 64) n = 64;
+        request.parallelStreams = n;
+    }
     if (json["timeout_ms"].isNumber()) request.timeoutMs = std::max(0, json["timeout_ms"].asInt());
     if (json["fail_fast"].isBool()) request.failFast = json["fail_fast"].asBool();
     if (json["callback_url"].isString()) request.callbackUrl = json["callback_url"].asString();

@@ -389,3 +389,32 @@ TEST_CASE("runner pool: stop waits for active sessions, restart replaces every p
     CHECK(f.bridge.hasStep("fake step"));
     CHECK(!f.bridge.hasStep("missing"));
 }
+
+TEST_CASE("runner pool: reserveSlots takes N distinct slots atomically") {
+    PoolFixture f(3);
+    std::vector<int> ids = f.bridge.reserveSlots(3);
+    REQUIRE_EQ(ids.size(), static_cast<size_t>(3));
+    std::set<int> unique(ids.begin(), ids.end());
+    CHECK_EQ(unique.size(), static_cast<size_t>(3));
+    CHECK_EQ(f.bridge.getStatus().busyCount, 3);
+
+    std::atomic<bool> acquired{false};
+    std::thread waiter([&] {
+        std::vector<int> extra = f.bridge.reserveSlots(1);
+        REQUIRE_EQ(extra.size(), static_cast<size_t>(1));
+        RunnerBridge::Session session = f.bridge.attachReserved(extra[0]);
+        acquired = session.active();
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    CHECK(!acquired.load());
+
+    {
+        std::vector<RunnerBridge::Session> hold;
+        hold.reserve(ids.size());
+        for (int id : ids) hold.push_back(f.bridge.attachReserved(id));
+        CHECK_EQ(f.bridge.getStatus().busyCount, 3);
+    }
+    waiter.join();
+    CHECK(acquired.load());
+    CHECK_EQ(f.bridge.getStatus().busyCount, 0);
+}

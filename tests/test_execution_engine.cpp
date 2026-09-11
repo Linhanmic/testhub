@@ -445,3 +445,39 @@ TEST_CASE("store: engine reloads persisted history on start and trims it") {
         bridge.stopRunner();
     }
 }
+
+TEST_CASE("engine: parallel_streams run scenarios concurrently and keep original order") {
+    Harness h;
+    h.temp.write("parallel.spec",
+                 "# 并行\n\n## 慢场景甲\n* sleep \"400\"\n\n## 慢场景乙\n* sleep \"400\"\n");
+    TestRequest req;
+    req.specFiles = {"parallel.spec"};
+    req.name = "streams";
+    req.parallelStreams = 2;
+    auto start = std::chrono::steady_clock::now();
+    std::string id = h.engine.submit(req);
+    TestStatus st = h.waitFor(id);
+    double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    CHECK(st.state == TestState::PASSED);
+    CHECK_EQ(st.totalScenarios, 2);
+    CHECK_EQ(st.passedScenarios, 2);
+    CHECK_MSG(seconds < 0.65, "two 400 ms streams took " + std::to_string(seconds) + " s; expected overlap (~0.4 s), not serial (~0.8 s)");
+    auto result = h.engine.getResult(id);
+    REQUIRE(result.has_value());
+    REQUIRE_EQ(result->specResults.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(result->specResults[0].scenarioResults.size(), static_cast<size_t>(2));
+    CHECK_EQ(result->specResults[0].scenarioResults[0].scenarioName, std::string("慢场景甲"));
+    CHECK_EQ(result->specResults[0].scenarioResults[1].scenarioName, std::string("慢场景乙"));
+}
+
+TEST_CASE("engine: parallel_streams=1 matches sequential results") {
+    Harness h;
+    h.temp.write("pass.spec", kPassing);
+    TestRequest req;
+    req.specFiles = {"pass.spec"};
+    req.parallelStreams = 1;
+    std::string id = h.engine.submit(req);
+    TestStatus st = h.waitFor(id);
+    CHECK(st.state == TestState::PASSED);
+    CHECK_EQ(st.totalScenarios, 2);
+}

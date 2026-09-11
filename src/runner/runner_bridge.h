@@ -4,9 +4,10 @@
  * 并向执行引擎暴露统一的步骤执行接口。
  *
  * 池模型：
- *   - 池中每个槽位对应一个独立的 Runner 进程；执行引擎以"会话"为粒度独占一个槽位——
- *     一个测试从 before_suite 到 after_suite 的全部钩子与场景都落在同一进程上，
- *     不同测试则在不同进程上真正并行（与 Gauge 并行流的语义一致）。
+ *   - 池中每个槽位对应一个独立的 Runner 进程；执行引擎以"会话"为粒度占用槽位——
+ *     默认一个测试独占一个进程（before_suite … after_suite 同进程）；
+ *     `parallel_streams > 1` 时一次原子预约 N 个槽位，把该测试的场景分到 N 个进程
+ *     （每个流各自跑 suite/spec 钩子，与 Gauge `--parallel` 流语义一致）。
  *   - 并发安全的 Runner（如内置 mock）无需多进程，池自动收缩为 1 个共享槽位。
  *   - 每个槽位独立自愈：某个进程崩溃只会重启该槽位，不影响其他正在执行的测试。
  */
@@ -91,6 +92,11 @@ public:
     int poolSize() const;
 
     /**
+     * 池是否已收缩为共享槽位（并发安全的 Runner，如 mock）
+     */
+    bool isConcurrencySafe() const;
+
+    /**
      * 会话：持有期间独占池中的一个 Runner 槽位，并把该槽位绑定到当前线程——
      * 此后本线程调用 executeStep/runHook 都会落在这个 Runner 上，保证同一测试的钩子与步骤
      * 不会与其他测试交错执行（Runner 内部的状态因此保持一致）。
@@ -121,6 +127,18 @@ public:
         int prevSlot_ = -1;
     };
     Session acquireSession();
+
+    /**
+     * 原子预约 n 个槽位：直到同时有 n 个空闲槽位才一次性占用，避免"先拿 1 再等其余"
+     * 造成的死锁。返回的下标尚未绑定 thread_local，必须在将要执行步骤的线程上
+     * 调用 attachReserved()。n 会被限制在 [1, 池大小]；并发安全的 Runner 返回 n 个相同下标。
+     */
+    std::vector<int> reserveSlots(int n);
+
+    /**
+     * 把 reserveSlots 得到的槽位绑定到当前线程；析构时释放预约。
+     */
+    Session attachReserved(int slotIndex);
 
     /**
      * 执行步骤（线程安全；在会话内执行时使用会话绑定的 Runner，否则临时占用一个空闲槽位；
@@ -173,7 +191,7 @@ private:
     void startAllSlots(std::unique_lock<std::mutex>& lock, bool restart);
     void stopAllSlots(std::unique_lock<std::mutex>& lock);
     void waitForIdle(std::unique_lock<std::mutex>& lock);
-    int acquireSlot();
+    std::vector<int> reserveSlotsLocked(std::unique_lock<std::mutex>& lock, int n);
     void releaseSlot(int index);
     Slot* boundSlot();
     bool ensureAlive(Slot& slot);

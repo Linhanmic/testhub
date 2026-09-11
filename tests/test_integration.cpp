@@ -998,3 +998,40 @@ TEST_CASE("integration: node runner executes the bundled specs end to end") {
     CHECK(restart.json()["pid"].asInt() != oldPid);
     CHECK_EQ(restart.json()["step_count"].asInt(), runner["step_count"].asInt());
 }
+
+TEST_CASE("integration: parallel_streams split one test across runner processes") {
+    if (std::system("python3 -c 'import sys' >/dev/null 2>&1") != 0) {
+        std::cout << "    (python3 not available; skipping)\n";
+        return;
+    }
+    std::string runnerDir = std::string(TESTHUB_SOURCE_DIR) + "/runners/python";
+    Server s("", [&](TestHubConfig& cfg) {
+        cfg.runnerLanguage = "python";
+        cfg.runnerCommand = "python3 " + runnerDir + "/testhub_runner.py";
+        cfg.projectPath = runnerDir;
+        cfg.maxConcurrentTests = 1;   // 一个 worker 也能占用多个 Runner 进程
+        cfg.runnerPoolSize = 2;
+    });
+    FileUtil::writeFile(s.specsDir + "/streams.spec",
+                        "# 流\n\n## 甲\n* 等待 \"0.8\" 秒\n* 输入第一个数 \"1\"\n* 输入第二个数 \"2\"\n* 点击加号\n* 结果应该是 \"3\"\n\n"
+                        "## 乙\n* 等待 \"0.8\" 秒\n* 输入第一个数 \"4\"\n* 输入第二个数 \"5\"\n* 点击加号\n* 结果应该是 \"9\"\n");
+    auto start = std::chrono::steady_clock::now();
+    HttpResult submit = request(s.port, "POST", "/api/v1/tests",
+                                R"({"spec_files":["streams.spec"],"name":"streams","parallel_streams":2})");
+    REQUIRE_EQ(submit.status, 202);
+    Json st = s.waitForTerminal(submit.json()["test_id"].asString(), 15000);
+    double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    CHECK_EQ(st["state"].asString(), std::string("passed"));
+    CHECK_EQ(st["total_scenarios"].asInt(), 2);
+    CHECK_EQ(st["passed_scenarios"].asInt(), 2);
+    CHECK_MSG(seconds < 1.5, "two 0.8 s scenarios in one test took " + std::to_string(seconds) +
+                             " s; expected parallel_streams to overlap them");
+    Json result = request(s.port, "GET", "/api/v1/tests/" + st["test_id"].asString() + "/result").json();
+    REQUIRE_EQ(result["specs"][0]["scenarios"].size(), static_cast<size_t>(2));
+    CHECK_EQ(result["specs"][0]["scenarios"][0]["name"].asString(), std::string("甲"));
+    CHECK_EQ(result["specs"][0]["scenarios"][1]["name"].asString(), std::string("乙"));
+    Json runner = request(s.port, "GET", "/api/v1/runner/status").json();
+    CHECK_EQ(runner["pool_size"].asInt(), 2);
+    CHECK(runner["runners"][0]["steps_executed"].asNumber() > 0);
+    CHECK(runner["runners"][1]["steps_executed"].asNumber() > 0);
+}

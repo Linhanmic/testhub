@@ -341,42 +341,6 @@ bool RunnerBridge::restartRunner() {
 // 槽位分配
 // ============================================================
 
-int RunnerBridge::acquireSlot() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    if (slots_.empty()) return -1;
-    if (concurrencySafe_) {
-        slotCv_.wait(lock, [&] { return !draining_; });
-        if (slots_.empty()) return -1;
-        ++slots_[0]->users;
-        return 0;
-    }
-    auto usable = [&](const Slot& s) {
-        // 永久失效（重启次数耗尽）的槽位只有在没有任何可用槽位时才会被分配，让调用方拿到明确的错误而不是无限等待
-        return s.state != RunnerState::RUNNER_ERROR || (config_.autoRestart && s.restartCount < config_.maxRestarts);
-    };
-    int chosen = -1;
-    slotCv_.wait(lock, [&] {
-        if (draining_) return false;
-        chosen = -1;
-        bool anyUsable = false;
-        int firstFree = -1, firstFreeUsable = -1, firstFreeConnected = -1;
-        for (const auto& slot : slots_) {
-            bool ok = usable(*slot);
-            anyUsable = anyUsable || ok;
-            if (slot->users > 0) continue;
-            if (firstFree < 0) firstFree = slot->index;
-            if (ok && firstFreeUsable < 0) firstFreeUsable = slot->index;
-            if (ok && slot->state == RunnerState::CONNECTED && firstFreeConnected < 0) firstFreeConnected = slot->index;
-        }
-        if (firstFreeConnected >= 0) chosen = firstFreeConnected;
-        else if (firstFreeUsable >= 0) chosen = firstFreeUsable;
-        else if (!anyUsable) chosen = firstFree;
-        return chosen >= 0;
-    });
-    slots_[static_cast<size_t>(chosen)]->users = 1;
-    return chosen;
-}
-
 void RunnerBridge::releaseSlot(int index) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -388,9 +352,66 @@ void RunnerBridge::releaseSlot(int index) {
 }
 
 RunnerBridge::Session RunnerBridge::acquireSession() {
-    int index = acquireSlot();
-    if (index < 0) return Session();
-    return Session(this, index);
+    std::vector<int> slots = reserveSlots(1);
+    if (slots.empty()) return Session();
+    return Session(this, slots[0]);
+}
+
+RunnerBridge::Session RunnerBridge::attachReserved(int slotIndex) {
+    return Session(this, slotIndex);
+}
+
+std::vector<int> RunnerBridge::reserveSlots(int n) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return reserveSlotsLocked(lock, n);
+}
+
+std::vector<int> RunnerBridge::reserveSlotsLocked(std::unique_lock<std::mutex>& lock, int n) {
+    if (n < 1) n = 1;
+    if (slots_.empty()) return {};
+    if (concurrencySafe_) {
+        slotCv_.wait(lock, [&] { return !draining_ && !slots_.empty(); });
+        if (slots_.empty()) return {};
+        slots_[0]->users += n;
+        return std::vector<int>(static_cast<size_t>(n), 0);
+    }
+    if (n > static_cast<int>(slots_.size())) n = static_cast<int>(slots_.size());
+    auto usable = [&](const Slot& s) {
+        return s.state != RunnerState::RUNNER_ERROR || (config_.autoRestart && s.restartCount < config_.maxRestarts);
+    };
+    std::vector<int> chosen;
+    slotCv_.wait(lock, [&] {
+        if (draining_ || slots_.empty()) return false;
+        chosen.clear();
+        std::vector<int> connected, freeUsable, freeAny;
+        bool anyUsable = false;
+        for (const auto& slot : slots_) {
+            bool ok = usable(*slot);
+            anyUsable = anyUsable || ok;
+            if (slot->users > 0) continue;
+            freeAny.push_back(slot->index);
+            if (ok) {
+                freeUsable.push_back(slot->index);
+                if (slot->state == RunnerState::CONNECTED) connected.push_back(slot->index);
+            }
+        }
+        if (static_cast<int>(connected.size()) >= n) {
+            chosen.assign(connected.begin(), connected.begin() + n);
+            return true;
+        }
+        if (static_cast<int>(freeUsable.size()) >= n) {
+            chosen.assign(freeUsable.begin(), freeUsable.begin() + n);
+            return true;
+        }
+        if (!anyUsable && static_cast<int>(freeAny.size()) >= n) {
+            chosen.assign(freeAny.begin(), freeAny.begin() + n);
+            return true;
+        }
+        return false;
+    });
+    if (chosen.empty()) return {};
+    for (int index : chosen) slots_[static_cast<size_t>(index)]->users = 1;
+    return chosen;
 }
 
 RunnerBridge::Slot* RunnerBridge::boundSlot() {
@@ -403,6 +424,10 @@ RunnerBridge::Slot* RunnerBridge::boundSlot() {
 int RunnerBridge::poolSize() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return slots_.empty() ? 1 : static_cast<int>(slots_.size());
+}
+
+bool RunnerBridge::isConcurrencySafe() const {
+    return concurrencySafe_.load();
 }
 
 // ============================================================
