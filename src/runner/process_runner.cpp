@@ -19,6 +19,15 @@
 #endif
 
 namespace testhub {
+namespace {
+
+// Python 在 Windows 上默认用系统代码页写 stdout；协议通道必须是 UTF-8。
+void ensurePythonUtf8Env(std::map<std::string, std::string>& env) {
+    if (env.find("PYTHONUTF8") == env.end()) env.emplace("PYTHONUTF8", "1");
+    if (env.find("PYTHONIOENCODING") == env.end()) env.emplace("PYTHONIOENCODING", "utf-8");
+}
+
+}  // namespace
 
 // ============================================================
 // ChildProcess
@@ -33,6 +42,9 @@ ChildProcess::~ChildProcess() {
 
 bool ChildProcess::start(const std::string& command, const std::string& workingDir,
                          const std::map<std::string, std::string>& env) {
+    std::map<std::string, std::string> childEnv = env;
+    ensurePythonUtf8Env(childEnv);
+
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
@@ -59,10 +71,10 @@ bool ChildProcess::start(const std::string& command, const std::string& workingD
         std::string entry(p);
         size_t eq = entry.find('=');
         std::string key = eq == std::string::npos ? entry : entry.substr(0, eq);
-        if (env.find(key) == env.end()) { envBlock += entry; envBlock.push_back('\0'); }
+        if (childEnv.find(key) == childEnv.end()) { envBlock += entry; envBlock.push_back('\0'); }
     }
     FreeEnvironmentStringsA(parentEnv);
-    for (const auto& kv : env) { envBlock += kv.first + "=" + kv.second; envBlock.push_back('\0'); }
+    for (const auto& kv : childEnv) { envBlock += kv.first + "=" + kv.second; envBlock.push_back('\0'); }
     envBlock.push_back('\0');
 
     std::string cmdLine = "cmd.exe /C " + command;
@@ -150,6 +162,9 @@ void ChildProcess::closeAll() {
 
 bool ChildProcess::start(const std::string& command, const std::string& workingDir,
                          const std::map<std::string, std::string>& env) {
+    std::map<std::string, std::string> childEnv = env;
+    ensurePythonUtf8Env(childEnv);
+
     int inPipe[2], outPipe[2], errPipe[2];
     if (pipe(inPipe) != 0) { lastError_ = std::string("pipe(stdin): ") + strerror(errno); return false; }
     if (pipe(outPipe) != 0) { lastError_ = std::string("pipe(stdout): ") + strerror(errno); close(inPipe[0]); close(inPipe[1]); return false; }
@@ -176,7 +191,7 @@ bool ChildProcess::start(const std::string& command, const std::string& workingD
                 _exit(126);
             }
         }
-        for (const auto& kv : env) setenv(kv.first.c_str(), kv.second.c_str(), 1);
+        for (const auto& kv : childEnv) setenv(kv.first.c_str(), kv.second.c_str(), 1);
         setpgid(0, 0);
         execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
         _exit(127);

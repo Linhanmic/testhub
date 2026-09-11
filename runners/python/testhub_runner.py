@@ -61,6 +61,20 @@ from typing import Any, Callable, Dict, List, Optional
 
 __version__ = "python-1.0"
 
+
+def _configure_utf8_stdio() -> None:
+    """JSON-lines 协议是 UTF-8。Windows 默认 cp1252 无法写出中文步骤文本。"""
+    os.environ.setdefault("PYTHONUTF8", "1")
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 # ------------------------------------------------------------
 # 公共 API：步骤注册与辅助类型
 # ------------------------------------------------------------
@@ -235,10 +249,15 @@ class Runner:
 
     # ---- 输出 ----
     def send(self, message: Dict[str, Any]) -> None:
-        line = json.dumps(message, ensure_ascii=False)
+        payload = (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
         with self._write_lock:
-            self.out.write(line + "\n")
-            self.out.flush()
+            buf = getattr(self.out, "buffer", None)
+            if buf is not None:
+                buf.write(payload)
+                buf.flush()
+            else:
+                self.out.write(payload.decode("utf-8"))
+                self.out.flush()
 
     def log(self, level: str, message: str) -> None:
         self.send({"type": "log", "level": level, "message": message})
@@ -392,6 +411,7 @@ class Runner:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    _configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="TestHub Python runner")
     parser.add_argument("--impl-dir", default=os.environ.get("TESTHUB_STEP_IMPL", "step_impl"),
                         help="步骤实现目录（默认 step_impl，可用环境变量 TESTHUB_STEP_IMPL 覆盖）")

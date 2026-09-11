@@ -256,6 +256,12 @@
 - UI i18n：`web/i18n.js` 中文为键、英文对照；侧栏原生 `<select>` 切换；`document.documentElement.lang`；`localizePage` 翻译精确匹配的标签。仪表盘服务摘要（规范监控 / 计划 / 回调）与插值字符串走 `t()`。规范正文与步骤名不翻译
 - `tests/test_i18n.js` 校验目录与插值
 
+### 迭代 27 — Windows Python Runner UTF-8
+
+- Windows CI 的 `python_runner_protocol` 在 cp1252 stdout 上写出「的」失败
+- Python Runner 启动时把 stdin/stdout 设为 UTF-8，协议行按 UTF-8 字节写出；子进程注入 `PYTHONUTF8` / `PYTHONIOENCODING`
+- 协议测试在子进程环境中同样强制 UTF-8
+
 ---
 
 ## 决策记录
@@ -284,7 +290,7 @@
 | 迭代 23 | 项目只切换规范/概念目录，Runner 保持全局 | 「多套用例、同一套步骤实现」是主场景；换 Runner 要重启进程池且不能与运行中的测试并存，留给以后按项目覆盖 runner 字段 |
 | 迭代 24 | Windows 服务进 testhub.exe 而不是依赖 NSSM；Docker 用多阶段非 root | 零第三方服务包装器；SCM 能真正 STOP。镜像不跑测试、不含源码，减小攻击面 |
 | 迭代 25 | 忙碌判定以记录状态为准，而不是队列长度 | 出队后解析规范、预约 Runner 槽期间状态仍是 QUEUED，queue.size() 已为 0 |
-| 迭代 26 | UI 文案以中文为键、运行时替换；不翻译规范/步骤正文 | 避免把用例文本误译；侧栏语言选择符合「英文界面」而不引入构建步骤 |
+| 迭代 27 | JSON-lines 协议通道强制 UTF-8，不跟随系统代码页 | Windows 默认 cp1252 无法编码中文步骤文本；管道传输本就与控制台代码页无关 |
 
 ---
 

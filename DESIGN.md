@@ -187,7 +187,7 @@ class Runner {                      // 抽象接口
 ```
 
 - `MockRunner`：进程内实现，所有步骤通过，可配置 `mock_delay_ms`，`isConcurrencySafe() == true`；用于测试与演示。
-- `ProcessRunner`：启动子进程（POSIX `fork/exec` 经 `/bin/sh -c`，Windows `CreateProcess`），stdin 写请求、stdout 读响应、stderr 直通日志；请求携带递增 `id`，响应按 `id` 匹配，支持超时。
+- `ProcessRunner`：启动子进程（POSIX `fork/exec` 经 `/bin/sh -c`，Windows `CreateProcess`），stdin 写请求、stdout 读响应、stderr 直通日志；请求携带递增 `id`，响应按 `id` 匹配，支持超时。协议通道为 **UTF-8 JSON-lines**（与系统代码页无关）；启动 Python Runner 时注入 `PYTHONUTF8=1` / `PYTHONIOENCODING=utf-8`。
 - `ProcessRunner::stop()` 先发 `kill` 消息礼貌等待，再对**进程组**发 SIGTERM/SIGKILL。命令经 `sh -c` 启动，子进程 `setpgid(0,0)` 自成进程组；若 `sh` 被外部杀死，真正的 Runner 会成为孤儿并继续持有管道，读线程永远等不到 EOF——因此即使直接子进程已退出也要清理进程组（迭代 14 修复的死锁）。
 - `RunnerBridge`（Runner 池）：
   - 按 `runner.language` 选择实现：`mock` / `python`（自动定位 `runners/python/testhub_runner.py`）/ `node`/`js`/`javascript`/`nodejs`（自动定位 `runners/node/testhub_runner.js`）/ `custom`（`runner.command`）；查找根为 `$TESTHUB_HOME`、可执行文件所在目录及其上级、`share/testhub`、当前目录。`setRunnerFactory()` 允许测试/嵌入方注入自定义 Runner。

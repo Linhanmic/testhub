@@ -16,10 +16,13 @@ RUNNER = os.path.join(HERE, "testhub_runner.py")
 
 class RunnerProcess:
     def __init__(self, impl_dir):
+        env = os.environ.copy()
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         self.proc = subprocess.Popen(
             [sys.executable, RUNNER, "--impl-dir", impl_dir],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", cwd=HERE,
+            text=True, encoding="utf-8", errors="replace", cwd=HERE, env=env,
         )
         self.next_id = 1
 
