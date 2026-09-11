@@ -143,6 +143,8 @@ http.get("/api/v1/hello/{name}", [this](const HttpRequest& req) {
 
 并发（`-j N`）时 TestHub 默认启动 N 个 Runner 进程组成池，每个测试默认独占一个进程，因此 Runner 只需处理串行请求、不必线程安全；进程可通过环境变量 `TESTHUB_RUNNER_INDEX` / `TESTHUB_RUNNER_POOL_SIZE` 区分自己（例如为每个进程分配独立的浏览器 profile 或端口）。提交测试时把 `parallel_streams` 设为大于 1，会把**该测试**的场景拆到多个进程（每个进程仍是串行的，会各自跑一遍 suite/spec 钩子）。`--runner-pool <n>` 可单独指定进程数。收到 `kill` 后请尽快退出，否则 1.5 s 后会被 SIGTERM/SIGKILL 终止整个进程组。
 
+抖动的断言可设 `step_retry`（0–5）或在规范/场景上写 `tags: retry:1`（与请求取较大值）：仅对 `FAILED` 重试，不重试缺实现/崩溃/超时。结果树与 `step.retry` 事件会标出 `attempts`。
+
 ### 添加规范示例
 
 把 `.spec` 放入 `specs/`，概念放入 `specs/concepts/`。服务默认每 2 秒轮询规范目录，用编辑器或 `git pull` 改动的文件会自动生效（概念自动重载，UI 规范页实时刷新并提示）；也可以调用 `POST /api/v1/specs/reload` 或在 UI 点击"重新加载"立即扫描。`--watch-interval <ms>` 调整频率，`--no-watch` 关闭。

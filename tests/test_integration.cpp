@@ -394,6 +394,8 @@ TEST_CASE("integration: validation errors and bad json") {
     CHECK_EQ(missing.status, 400);
     CHECK(missing.json()["error"].asString().find("missing.spec") != std::string::npos);
     CHECK_EQ(request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["login.spec"],"tags":["(bad"]})").status, 400);
+    CHECK_EQ(request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["login.spec"],"step_retry":6})").status, 400);
+    CHECK_EQ(request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["login.spec"],"step_retry":-1})").status, 400);
     CHECK_EQ(request(s.port, "GET", "/api/v1/tests/does-not-exist").status, 404);
     CHECK_EQ(request(s.port, "GET", "/api/v1/tests/does-not-exist/result").status, 404);
 }
@@ -1070,6 +1072,31 @@ TEST_CASE("integration: parallel_streams split one test across runner processes"
     CHECK_EQ(runner["pool_size"].asInt(), 2);
     CHECK(runner["runners"][0]["steps_executed"].asNumber() > 0);
     CHECK(runner["runners"][1]["steps_executed"].asNumber() > 0);
+}
+
+TEST_CASE("integration: step_retry retries a flaky mock step") {
+    Server s;
+    HttpResult put = request(s.port, "PUT", "/api/v1/specs/flaky.spec",
+                             R"({"content":"# Flaky\n\n## Alpha\n* flaky alpha\n\n## Beta\n* flaky beta\n"})");
+    CHECK_EQ(put.status, 201);
+
+    HttpResult noRetry = request(s.port, "POST", "/api/v1/tests",
+                                 R"({"spec_files":["flaky.spec"],"scenarios":["Alpha"],"name":"no-retry"})");
+    REQUIRE_EQ(noRetry.status, 202);
+    CHECK_EQ(s.waitForTerminal(noRetry.json()["test_id"].asString())["state"].asString(), std::string("failed"));
+    Json failed = request(s.port, "GET",
+                          "/api/v1/tests/" + noRetry.json()["test_id"].asString() + "/result").json();
+    CHECK_EQ(failed["specs"][0]["scenarios"][0]["steps"][0]["attempts"].asInt(), 1);
+
+    HttpResult yes = request(s.port, "POST", "/api/v1/tests",
+                             R"({"spec_files":["flaky.spec"],"scenarios":["Beta"],"step_retry":1,"name":"retry"})");
+    REQUIRE_EQ(yes.status, 202);
+    std::string id = yes.json()["test_id"].asString();
+    CHECK_EQ(s.waitForTerminal(id)["state"].asString(), std::string("passed"));
+    Json ok = request(s.port, "GET", "/api/v1/tests/" + id + "/result").json();
+    CHECK_EQ(ok["specs"][0]["scenarios"][0]["steps"][0]["state"].asString(), std::string("passed"));
+    CHECK_EQ(ok["specs"][0]["scenarios"][0]["steps"][0]["attempts"].asInt(), 2);
+    CHECK_EQ(request(s.port, "GET", "/api/v1/tests/" + id).json()["request"]["step_retry"].asInt(), 1);
 }
 
 TEST_CASE("integration: selfcheck spec verifies the running server through its own HTTP API") {

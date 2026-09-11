@@ -118,6 +118,7 @@ void appendStepsText(std::ostringstream& out, const std::vector<StepResult>& ste
     for (const auto& s : steps) {
         out << pad << "  " << stateMark(s.state) << "  " << substituteDataRow(s.stepText, row);
         if (s.state != TestState::SKIPPED) out << "  (" << fmtDurationHuman(s.duration) << ")";
+        if (s.attempts > 1) out << "  [attempts=" << s.attempts << "]";
         out << "\n";
         for (const auto& m : s.messages) out << pad << "      > " << m << "\n";
         if (!s.errorMessage.empty()) out << pad << "      ! " << s.errorMessage << "\n";
@@ -146,6 +147,7 @@ void appendStepsHtml(std::ostringstream& out, const std::vector<StepResult>& ste
         std::string cls = testStateToString(s.state);
         out << "<li class=\"step " << cls << "\"><span class=\"mark\">" << stateMark(s.state) << "</span>"
             << "<span class=\"text\">" << ReportWriter::escapeHtml(substituteDataRow(s.stepText, row)) << "</span>";
+        if (s.attempts > 1) out << "<span class=\"retry\">×" << s.attempts << "</span>";
         if (s.state != TestState::SKIPPED) out << "<span class=\"dur\">" << fmtDurationHuman(s.duration) << "</span>";
         if (!s.messages.empty()) {
             out << "<pre class=\"msg\">";
@@ -187,6 +189,7 @@ const char* kHtmlStyle =
     ".step .mark{font-family:ui-monospace,monospace;font-size:11px;font-weight:700;width:52px;flex:none}"
     ".step.passed .mark{color:#16a34a}.step.failed .mark,.step.error .mark{color:#dc2626}.step.skipped .mark{color:#9ca3af}"
     ".step.failed,.step.error{background:#fef2f2}.step .text{flex:1;font-family:ui-monospace,monospace;font-size:13px}"
+    ".step .retry{font-size:11px;color:#b45309;background:#fef3c7;border-radius:4px;padding:0 6px}"
     ".step .dur{color:#9ca3af;font-size:12px}pre{flex-basis:100%;margin:2px 0 0 60px;padding:8px 10px;border-radius:4px;font-size:12px;"
     "white-space:pre-wrap;word-break:break-word;background:#f3f4f6}pre.err{background:#fee2e2;color:#7f1d1d}pre.stack{color:#6b7280}"
     ".tags span{display:inline-block;background:#eef2ff;color:#3730a3;border-radius:4px;padding:0 6px;font-size:11px;margin-right:4px}"

@@ -217,7 +217,7 @@
     const d = ev.data || {};
     const parts = [];
     if (ev.test_id) parts.push(`<a href="#/tests/${esc(ev.test_id)}">${esc(ev.test_id)}</a>`);
-    for (const k of ['state', 'spec', 'scenario', 'step', 'progress', 'detail', 'message', 'error', 'name', 'url', 'status', 'attempts', 'source', 'action', 'file', 'files', 'created', 'updated', 'deleted', 'slot', 'stream']) {
+    for (const k of ['state', 'spec', 'scenario', 'step', 'progress', 'detail', 'message', 'error', 'name', 'url', 'status', 'attempts', 'attempt', 'max_retries', 'source', 'action', 'file', 'files', 'created', 'updated', 'deleted', 'slot', 'stream']) {
       if (d[k] !== undefined && d[k] !== '') {
         let v = d[k];
         if ((k === 'created' || k === 'updated' || k === 'deleted') && v === '0') continue;
@@ -463,9 +463,26 @@
         case 'step.started': {
           const sc = runningScenario(d);
           if (!sc) break;
-          const st = { step: d.step, state: 'running', concept: d.is_concept === 'true', children: [] };
+          const st = { step: d.step, state: 'running', concept: d.is_concept === 'true', children: [], attempts: 1 };
           (sc.stack.length ? sc.stack[sc.stack.length - 1].children : sc.steps).push(st);
           if (st.concept) sc.stack.push(st);
+          break;
+        }
+        case 'step.retry': {
+          const sc = runningScenario(d);
+          if (!sc) break;
+          const mark = (steps) => {
+            for (let i = steps.length - 1; i >= 0; i--) {
+              if (steps[i].step === d.step && steps[i].state === 'running') {
+                steps[i].attempts = parseInt(d.attempt, 10) || 1;
+                steps[i].error = d.error;
+                return true;
+              }
+              if (steps[i].children && mark(steps[i].children)) return true;
+            }
+            return false;
+          };
+          mark(sc.steps);
           break;
         }
         case 'step.completed': {
@@ -476,7 +493,13 @@
           let st = null;
           for (let i = list.length - 1; i >= 0; i--) if (list[i].step === d.step && list[i].state === 'running') { st = list[i]; break; }
           if (!st && top && top.step === d.step) st = top;
-          if (st) { st.state = d.state || 'passed'; st.duration = parseFloat(d.duration); st.error = d.error; if (st.concept && top === st) sc.stack.pop(); }
+          if (st) {
+            st.state = d.state || 'passed';
+            st.duration = parseFloat(d.duration);
+            st.error = d.error;
+            st.attempts = parseInt(d.attempts, 10) || st.attempts || 1;
+            if (st.concept && top === st) sc.stack.pop();
+          }
           break;
         }
         default: break;
@@ -484,8 +507,11 @@
     };
     const stepsHtml = (steps) => steps.map((st) => {
       const mark = { passed: '✓', failed: '✗', error: '!', skipped: '–', running: '◌' }[st.state] || '·';
-      const right = st.state === 'running' ? '<span class="pill running">运行中</span>' : (st.duration != null && !isNaN(st.duration) ? `<span class="dur">${fmtDur(st.duration)}</span>` : '');
-      let html = `<div class="step ${esc(st.state)}"><span class="mark">${mark}</span><span class="text">${highlightStep(st.step)}${st.concept ? ' <span class="tag">concept</span>' : ''}</span>${right}</div>`;
+      const retry = st.attempts > 1 ? `<span class="tag retry" title="执行 ${st.attempts} 次">×${st.attempts}</span>` : '';
+      const right = st.state === 'running'
+        ? (st.attempts > 1 ? `<span class="pill queued">重试 ${st.attempts}</span>` : '<span class="pill running">运行中</span>')
+        : (st.duration != null && !isNaN(st.duration) ? `<span class="dur">${fmtDur(st.duration)}</span>` : '');
+      let html = `<div class="step ${esc(st.state)}"><span class="mark">${mark}</span><span class="text">${highlightStep(st.step)}${st.concept ? ' <span class="tag">concept</span>' : ''}${retry}</span>${right}</div>`;
       if (st.error) html += `<div class="step-error">${esc(st.error)}</div>`;
       if (st.children.length) html += `<div class="concept-steps">${stepsHtml(st.children)}</div>`;
       return html;
@@ -553,6 +579,7 @@
               <dt>优先级</dt><dd>${esc(req.priority)}</dd>
               <dt>环境</dt><dd>${esc(req.environment)}</dd>
               <dt>fail_fast</dt><dd>${req.fail_fast ? '是' : '否'}</dd>
+              <dt>步骤重试</dt><dd>${req.step_retry > 0 ? req.step_retry + ' 次' : '否'}</dd>
               <dt>并行流</dt><dd>${req.parallel_streams > 1 ? req.parallel_streams + ' 个进程' : '顺序（1）'}</dd>
               <dt>超时</dt><dd>${req.timeout_ms ? req.timeout_ms + ' ms' : '默认'}</dd>
               ${req.callback_url ? `<dt>回调</dt><dd class="mono small">${esc(req.callback_url)}</dd>` : ''}
@@ -613,8 +640,9 @@
     const mark = { passed: '✓', failed: '✗', error: '!', skipped: '–' }[s.state] || '·';
     const missing = implemented && !s.is_concept && s.parameterized_text && !implemented.has(s.parameterized_text);
     const showDur = s.duration != null && s.state !== 'skipped' && s.state !== 'none';
+    const retry = s.attempts > 1 ? `<span class="tag retry" title="执行 ${s.attempts} 次">×${s.attempts}</span>` : '';
     const right = showDur ? `<span class="dur">${fmtDur(s.duration)}</span>` : (missing ? '<span class="pill error" title="Runner 未报告此步骤的实现">未实现</span>' : '');
-    let html = `<div class="step ${esc(s.state)}${missing ? ' missing' : ''}"><span class="mark">${mark}</span><span class="text">${highlightStep(s.step, dataRow)}${s.is_concept ? ' <span class="tag">concept</span>' : ''}</span>${right}</div>`;
+    let html = `<div class="step ${esc(s.state)}${missing ? ' missing' : ''}"><span class="mark">${mark}</span><span class="text">${highlightStep(s.step, dataRow)}${s.is_concept ? ' <span class="tag">concept</span>' : ''}${retry}</span>${right}</div>`;
     if (s.error) html += `<div class="step-error">${esc(s.error)}${s.stack_trace ? '\n' + esc(s.stack_trace) : ''}</div>`;
     if (s.messages && s.messages.length) html += `<div class="step-msgs">${s.messages.map(esc).join('<br>')}</div>`;
     if (s.is_concept && s.concept_steps) html += `<div class="concept-steps">${s.concept_steps.map((c) => stepHtml(c, dataRow, implemented)).join('')}</div>`;
@@ -671,6 +699,8 @@
             <label class="field">环境<input type="text" name="environment" value="default"></label>
             <label class="field">超时 (ms) <span class="help">0 表示默认</span><input type="number" name="timeout_ms" value="0" min="0" step="1000"></label>
             <label class="field">并行流 <span class="help">把本测试的场景拆到多个 Runner 进程；1 为顺序执行</span><input type="number" name="parallel_streams" value="1" min="1" max="64" step="1"></label>
+            <label class="field">步骤重试 <span class="help" id="step-retry-help">仅对断言失败重试，不重试错误/取消/超时；0 为不重试，上限 5。规范标签 <code>retry:N</code> 与本字段取较大值</span>
+              <input type="number" name="step_retry" id="step_retry" value="0" min="0" max="5" step="1" inputmode="numeric" autocomplete="off" aria-describedby="step-retry-help"></label>
           </div>
           <label class="field">完成回调 URL <span class="help">可选，测试结束后 POST JSON 摘要（仅 http://，失败自动重试）</span><input type="url" name="callback_url" placeholder="http://ci.example.com/hooks/testhub"></label>
           <label class="check"><input type="checkbox" name="fail_fast"> 首个失败场景后停止 (fail_fast)</label>
@@ -689,6 +719,7 @@
       body.priority = fd.get('priority'); body.environment = fd.get('environment') || 'default';
       const to = parseInt(fd.get('timeout_ms') || '0', 10); if (to > 0) body.timeout_ms = to;
       const streams = parseInt(fd.get('parallel_streams') || '1', 10); if (streams > 1) body.parallel_streams = streams;
+      const retry = parseInt(fd.get('step_retry') || '0', 10); if (retry > 0) body.step_retry = retry;
       if (fd.get('fail_fast')) body.fail_fast = true;
       if ((fd.get('callback_url') || '').trim()) body.callback_url = fd.get('callback_url').trim();
       return body;

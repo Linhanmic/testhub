@@ -5,7 +5,7 @@
 ## 当前状态（v1.1.0）
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
-- 114 个自动化测试全部通过（77 单元 + 18 集成 + 7 Python 协议 + 12 Node.js 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
+- 116 个自动化测试全部通过（78 单元 + 19 集成 + 7 Python 协议 + 12 Node.js 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
 - 约 15k 行（含前端、Python / Node.js Runner、测试）
 
 ## 路线图
@@ -16,7 +16,7 @@
 - [x] 零依赖 JSON（解析/序列化/下标访问/错误定位）
 - [x] `.spec` / `.cpt` 解析器（标题、标签、上下文、清理、数据表、参数、概念、行号、错误与警告）
 - [x] HTTP/1.1 服务器（Content-Length、keep-alive、流水线、超时、`{param}` 路由、HEAD/OPTIONS/405、CORS、ETag 静态资源、SPA 回退）
-- [x] 执行引擎（优先级队列、标签表达式、场景过滤、数据驱动、上下文/清理、超时、取消、fail_fast、重跑、历史）
+- [x] 执行引擎（优先级队列、标签表达式、场景过滤、数据驱动、上下文/清理、超时、取消、fail_fast、步骤重试、重跑、历史）
 - [x] Runner 抽象 + 子进程桥接（JSON-lines、崩溃检测、自动重启、步骤缓存）
 - [x] Python 参考 Runner（装饰器、钩子、DataTable、Messages、SkipStep、data_store）+ 示例步骤实现
 - [x] Node.js 参考 Runner（同一 JSON-lines 协议、async 步骤、零 npm 依赖）+ 示例步骤实现；同一套 .spec 可互换执行
@@ -36,7 +36,7 @@
 
 - [ ] 测试计划 / 定时任务（cron 表达式，周期性提交）
 - [ ] 结果对比与趋势（同一规范历次通过率、耗时曲线）
-- [ ] 步骤级重试策略（`retry: n` 标签或请求参数）
+- [x] 步骤级重试策略（`retry: n` 标签或请求参数）
 - [ ] UI：结果树搜索/只看失败、事件流暂停与导出、键盘快捷键
 - [ ] UI：规范编辑器语法高亮与步骤自动补全（基于 `/runner/steps`）
 - [ ] 多规范目录 / 多项目切换
@@ -184,6 +184,15 @@
 - 自举运行时当前槽位为 `busy` 而非空闲时的 `connected`，步骤「Runner 应在线」同时接受这两种可用状态
 - 测试：规范解析覆盖自举文件的引号参数；Python 集成测试跑完整 selfcheck + 子测试；Node 端到端用例末尾同样跑一遍
 
+### 迭代 18 — 步骤级重试
+
+- 请求字段 `step_retry`（默认 0，上限 5）与规范/场景标签 `retry:N` / `retry-N` 取较大值，作用在该场景的每一步
+- 只重试 `FAILED`（断言失败）；`TEST_ERROR`、取消、超时不重试。概念的内层步骤各自独立重试
+- `StepResult.attempts`（1 = 未重试）写入结果 JSON / 持久化 / JUnit 文本与 HTML；事件 `step.retry`（`attempt`、`max_retries`、`error`）+ 最终 `step.completed` 带 `attempts`
+- Mock Runner：步骤文案含 `flaky` 时该文案第一次失败、之后通过（计数加锁，因 `isConcurrencySafe`）
+- UI：提交表单「步骤重试」；详情请求栏与结果树在 `attempts>1` 时显示 ×N；实时执行树处理 `step.retry`
+- 测试：1 个引擎单测（无重试失败 / `step_retry=1` 与 `retry:1` 通过且 attempts=2 / TEST_ERROR 不重试 / 用尽 attempts=3 / JSON 越界拒绝）+ 集成 400 与 mock flaky 端到端
+
 ---
 
 ## 决策记录
@@ -206,6 +215,7 @@
 | 迭代 15 | Node.js Runner 用 CommonJS + 模块解析别名，不引入 npm 包 | 保持仓库零第三方依赖；`require('testhub-runner')` 解析到捆绑脚本即可；async/await 是 Node 自带能力，用来验证协议对异步步骤的等待语义 |
 | 迭代 16 | 并行流采用“凑齐 N 个槽位再开工”，不降级为更少的流 | 降级会让同一测试的 suite 钩子只跑在部分进程上，语义随池占用情况漂移；排队等齐更可预期。数据驱动的每一行当作独立场景分片 |
 | 迭代 17 | 自举步骤不轮询子测试；Runner「应在线」接受 connected/busy；状态接口不向忙进程发 get_steps | 步骤里 `wait` 子测试会在 `-j 1` 时占满唯一 worker 造成死锁；自举过程中当前槽位必然是 busy；JSON-lines 同步协议下 get_steps 与 execute_step 不能重叠 |
+| 迭代 18 | 只重试 FAILED，不重试 TEST_ERROR / 取消 / 超时；请求与标签取 max，上限 5 | 缺实现、崩溃、超时再跑一遍通常无意义；断言抖动才适合有限次重试。标签可按场景覆盖全局请求，避免误伤稳定用例 |
 
 ---
 
@@ -214,7 +224,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 114 个，全部通过（77 单元 + 18 集成 + 7 Python 协议 + 12 Node 协议）；`ctest` 约 7 s；TSan 零告警 |
+| 自动化测试 | 116 个，全部通过（78 单元 + 19 集成 + 7 Python 协议 + 12 Node 协议）；`ctest` 约 7 s；TSan 零告警 |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
 | 代码规模 | 约 14k 行（C++ 约 10.2k，前端约 1.2k，Python 约 0.7k，测试约 2.4k） |

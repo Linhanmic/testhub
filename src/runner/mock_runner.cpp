@@ -35,6 +35,19 @@ StepResult MockRunner::executeStep(const StepExecutionRequest& request) {
         result.state = TestState::TEST_ERROR;
         result.errorMessage = "Mock runner raised an error for step: " + request.stepText;
         result.stackTrace = "MockRunner.executeStep\n  at mock_runner.cpp";
+    } else if (StringUtil::contains(lower, "flaky")) {
+        int n = 0;
+        {
+            std::lock_guard<std::mutex> lock(flakyMutex_);
+            n = ++flakyCounts_[request.parameterizedText.empty() ? request.stepText : request.parameterizedText];
+        }
+        if (n == 1) {
+            result.state = TestState::FAILED;
+            result.errorMessage = "Mock runner flaky first attempt: " + request.stepText;
+            result.stackTrace = "MockRunner.executeStep\n  at mock_runner.cpp";
+        } else {
+            result.state = TestState::PASSED;
+        }
     } else if (StringUtil::contains(lower, "fail")) {
         result.state = TestState::FAILED;
         result.errorMessage = "Mock runner failed step: " + request.stepText;

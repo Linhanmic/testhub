@@ -105,6 +105,7 @@ inline Json toJson(const StepResult& r) {
     obj["parameterized_text"] = r.parameterizedText;
     obj["state"] = testStateToString(r.state);
     obj["duration"] = r.duration;
+    obj["attempts"] = r.attempts;
     if (!r.errorMessage.empty()) obj["error"] = r.errorMessage;
     if (!r.stackTrace.empty()) obj["stack_trace"] = r.stackTrace;
     if (!r.messages.empty()) obj["messages"] = toJson(r.messages);
@@ -171,6 +172,7 @@ inline Json toJson(const TestRequest& r) {
     obj["priority"] = priorityToString(r.priority);
     obj["timeout_ms"] = r.timeoutMs;
     obj["fail_fast"] = r.failFast;
+    obj["step_retry"] = r.stepRetry;
     obj["metadata"] = toJson(r.metadata);
     if (!r.callbackUrl.empty()) obj["callback_url"] = r.callbackUrl;
     if (!r.submittedBy.empty()) obj["submitted_by"] = r.submittedBy;
@@ -309,6 +311,8 @@ inline StepResult stepResultFromJson(const Json& json) {
     r.parameterizedText = json["parameterized_text"].asString("");
     r.state = stringToTestState(json["state"].asString("passed"));
     r.duration = json["duration"].asNumber(0.0);
+    r.attempts = json["attempts"].asInt(1);
+    if (r.attempts < 1) r.attempts = 1;
     r.errorMessage = json["error"].asString("");
     r.stackTrace = json["stack_trace"].asString("");
     r.messages = stringsFromJson(json["messages"]);
@@ -446,6 +450,18 @@ inline bool testRequestFromJson(const Json& json, TestRequest& request, std::str
     }
     if (json["timeout_ms"].isNumber()) request.timeoutMs = std::max(0, json["timeout_ms"].asInt());
     if (json["fail_fast"].isBool()) request.failFast = json["fail_fast"].asBool();
+    if (!json["step_retry"].isNull()) {
+        if (!json["step_retry"].isNumber()) {
+            error = "step_retry must be an integer between 0 and " + std::to_string(kMaxStepRetry);
+            return false;
+        }
+        int n = json["step_retry"].asInt();
+        if (n < 0 || n > kMaxStepRetry) {
+            error = "step_retry must be an integer between 0 and " + std::to_string(kMaxStepRetry);
+            return false;
+        }
+        request.stepRetry = n;
+    }
     if (json["callback_url"].isString()) request.callbackUrl = json["callback_url"].asString();
     if (json["submitted_by"].isString()) request.submittedBy = json["submitted_by"].asString();
     if (json["metadata"].isObject()) {

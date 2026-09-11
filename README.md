@@ -12,7 +12,7 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 |------|------|
 | 运行模式 | 守护进程常驻；`--daemon`、PID 文件、JSON 配置文件、CLI 覆盖 |
 | 规范 | `# 规范` / `## 场景` / `* 步骤`、`tags:`、规范级数据表（数据驱动）、上下文步骤、`___` 清理步骤、概念（`.cpt`）展开、`"静态"` / `<动态>` / `<file:>` / `<table:>` 参数、内联表格；目录监控：编辑器/git 改动自动生效并推送 `specs.reloaded` |
-| 执行引擎 | 优先级队列、标签过滤表达式（`smoke & !slow`）、场景名过滤、fail_fast、测试/步骤超时、取消、`failed_only` 重跑、结果历史；**并行流**（`parallel_streams`）把单个测试的场景拆到多个 Runner 进程 |
+| 执行引擎 | 优先级队列、标签过滤表达式（`smoke & !slow`）、场景名过滤、fail_fast、测试/步骤超时、取消、`failed_only` 重跑、结果历史；**步骤重试**（请求 `step_retry` 或标签 `retry:N`，仅对 FAILED）；**并行流**（`parallel_streams`）把单个测试的场景拆到多个 Runner 进程 |
 | 持久化 | 已完成的测试以 JSON 落盘（默认 `data/results/`），重启后自动回放历史与统计 |
 | 报表 | 按需导出 JUnit XML（供 Jenkins / GitLab / GitHub Actions 收集）与自包含 HTML 报告；UI 一键下载 |
 | 回调 | 请求携带 `callback_url`，测试结束后 POST JSON 摘要（含失败场景清单与报表链接），失败按指数退避重试 |
@@ -21,7 +21,7 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 | 服务端 | 多线程 HTTP/1.1（keep-alive、流水线、Content-Length、超时、`{param}` 路由、CORS、HEAD/OPTIONS、ETag 静态资源、SPA 回退） |
 | 实时性 | 异步事件总线；`/ws/v1/events` WebSocket 推送（按类型/测试 ID 订阅、历史回放） |
 | Web UI | 内嵌单页应用：总览、提交测试、测试记录、结果树、运行中实时执行树、规范浏览/编辑/校验、Runner 状态、事件流、暗色模式 |
-| 质量 | 77 个单元测试 + 18 个 HTTP/WS 集成测试 + 7 个 Python 协议测试 + 12 个 Node.js 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
+| 质量 | 78 个单元测试 + 19 个 HTTP/WS 集成测试 + 7 个 Python 协议测试 + 12 个 Node.js 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
 
 ## 快速开始
 
@@ -73,7 +73,7 @@ curl -o report.html "http://localhost:8080/api/v1/tests/test-20260910-142940-001
 
 `spec_files` 为空数组时表示运行规范目录下的全部规范。JUnit XML 可直接交给 Jenkins、GitLab CI（`artifacts:reports:junit`）或 GitHub Actions 的测试报告插件。
 
-请求体其他可选字段：`name`、`scenarios`（场景名过滤）、`priority`（low/normal/high/urgent）、`environment`、`timeout_ms`、`fail_fast`、`parallel_streams`（把本测试的场景拆到多个 Runner 进程，默认 1；受池大小与场景数限制）、`metadata`（字符串键值，会原样带入报表与回调）、`callback_url`（测试结束后 POST JSON 摘要到该 `http://` 地址，失败按指数退避重试；载荷含 `state`、场景计数、`failed_scenarios_detail` 与 `links.report_junit` 等链接）。
+请求体其他可选字段：`name`、`scenarios`（场景名过滤）、`priority`（low/normal/high/urgent）、`environment`、`timeout_ms`、`fail_fast`、`step_retry`（断言失败步骤的最大重试次数，默认 0、上限 5；规范/场景标签 `retry:N` 或 `retry-N` 与本字段取较大值；不重试 `error` / 取消 / 超时）、`parallel_streams`（把本测试的场景拆到多个 Runner 进程，默认 1；受池大小与场景数限制）、`metadata`（字符串键值，会原样带入报表与回调）、`callback_url`（测试结束后 POST JSON 摘要到该 `http://` 地址，失败按指数退避重试；载荷含 `state`、场景计数、`failed_scenarios_detail` 与 `links.report_junit` 等链接）。
 
 HTTP 绑定成功后，守护进程会把 `TESTHUB_URL`（`callbacks.public_base_url` 或 `http://127.0.0.1:<port>`）写入 Runner 环境；若启用了鉴权，同时写入 `TESTHUB_TOKEN`。用 Python 或 Node Runner 即可跑仓库自带的自举规范，用 TestHub 自己的 API 验证自己：
 

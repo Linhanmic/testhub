@@ -2,8 +2,9 @@
  * TestHub - 内置 Mock Runner
  * 无需外部进程即可完成端到端流程，用于演示、开发与自动化测试。
  * 规则：
- *   - 步骤文本包含 "fail"（不区分大小写）→ 失败
  *   - 步骤文本包含 "error"（不区分大小写）→ 错误
+ *   - 步骤文本包含 "flaky" → 该步骤文案第一次失败、之后通过（用于验证步骤重试）
+ *   - 步骤文本包含 "fail"（不区分大小写）→ 失败
  *   - 步骤文本包含 "sleep <ms>" 形式的参数 → 延迟对应毫秒
  *   - 其他 → 通过
  */
@@ -13,6 +14,9 @@
 #include "runner.h"
 
 #include <atomic>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 namespace testhub {
 
@@ -35,6 +39,8 @@ public:
 private:
     std::atomic<bool> alive_{false};
     int defaultDelayMs_;
+    mutable std::mutex flakyMutex_;
+    std::unordered_map<std::string, int> flakyCounts_;
 };
 
 } // namespace testhub

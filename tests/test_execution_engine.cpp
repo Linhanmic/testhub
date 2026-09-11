@@ -1,5 +1,6 @@
 #include "test_framework.h"
 #include "engine/execution_engine.h"
+#include "model/json_convert.h"
 #include "util/file_util.h"
 
 #include <chrono>
@@ -480,4 +481,80 @@ TEST_CASE("engine: parallel_streams=1 matches sequential results") {
     TestStatus st = h.waitFor(id);
     CHECK(st.state == TestState::PASSED);
     CHECK_EQ(st.totalScenarios, 2);
+}
+
+TEST_CASE("engine: step_retry retries FAILED but not TEST_ERROR") {
+    Harness h;
+    h.temp.write("flaky-none.spec", "# 不重试\n\n## 抖\n* flaky none\n");
+    h.temp.write("flaky-req.spec", "# 请求重试\n\n## 抖\n* flaky request\n");
+    h.temp.write("flaky-tag.spec", "# 标签重试\n\n## 抖\ntags: retry:1\n* flaky tagged\n");
+    h.temp.write("error-retry.spec", "# 错误不重试\n\n## 出错\n* error no-retry\n");
+    h.temp.write("fail-exhausted.spec", "# 用尽\n\n## 失败\n* fail exhausted\n");
+
+    auto firstStep = [&](const std::string& id) {
+        auto result = h.engine.getResult(id);
+        REQUIRE(result.has_value());
+        REQUIRE(!result->specResults.empty());
+        REQUIRE(!result->specResults[0].scenarioResults.empty());
+        REQUIRE(!result->specResults[0].scenarioResults[0].stepResults.empty());
+        return result->specResults[0].scenarioResults[0].stepResults[0];
+    };
+
+    {
+        TestRequest req;
+        req.specFiles = {"flaky-none.spec"};
+        std::string id = h.engine.submit(req);
+        CHECK(h.waitFor(id).state == TestState::FAILED);
+        StepResult sr = firstStep(id);
+        CHECK(sr.state == TestState::FAILED);
+        CHECK_EQ(sr.attempts, 1);
+    }
+    {
+        TestRequest req;
+        req.specFiles = {"flaky-req.spec"};
+        req.stepRetry = 1;
+        std::string id = h.engine.submit(req);
+        CHECK(h.waitFor(id).state == TestState::PASSED);
+        StepResult sr = firstStep(id);
+        CHECK(sr.state == TestState::PASSED);
+        CHECK_EQ(sr.attempts, 2);
+    }
+    {
+        TestRequest req;
+        req.specFiles = {"flaky-tag.spec"};
+        std::string id = h.engine.submit(req);
+        CHECK(h.waitFor(id).state == TestState::PASSED);
+        StepResult sr = firstStep(id);
+        CHECK(sr.state == TestState::PASSED);
+        CHECK_EQ(sr.attempts, 2);
+    }
+    {
+        TestRequest req;
+        req.specFiles = {"error-retry.spec"};
+        req.stepRetry = 5;
+        std::string id = h.engine.submit(req);
+        CHECK(h.waitFor(id).state == TestState::TEST_ERROR);
+        StepResult sr = firstStep(id);
+        CHECK(sr.state == TestState::TEST_ERROR);
+        CHECK_EQ(sr.attempts, 1);
+    }
+    {
+        TestRequest req;
+        req.specFiles = {"fail-exhausted.spec"};
+        req.stepRetry = 2;
+        std::string id = h.engine.submit(req);
+        CHECK(h.waitFor(id).state == TestState::FAILED);
+        StepResult sr = firstStep(id);
+        CHECK(sr.state == TestState::FAILED);
+        CHECK_EQ(sr.attempts, 3);
+    }
+
+    TestRequest parsed;
+    std::string err;
+    CHECK(!testRequestFromJson(Json::parse(R"({"step_retry":6})"), parsed, err));
+    CHECK(err.find("step_retry") != std::string::npos);
+    CHECK(!testRequestFromJson(Json::parse(R"({"step_retry":-1})"), parsed, err));
+    CHECK(testRequestFromJson(Json::parse(R"({"spec_files":["x.spec"],"step_retry":1})"), parsed, err));
+    CHECK_EQ(parsed.stepRetry, 1);
+    CHECK_EQ(toJson(parsed)["step_retry"].asInt(), 1);
 }

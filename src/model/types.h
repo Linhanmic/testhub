@@ -114,6 +114,9 @@ inline std::string runnerStateToString(RunnerState state) {
 
 using TimePoint = std::chrono::system_clock::time_point;
 
+/** 步骤重试次数上限（不含首次执行）；请求字段与 retry:N 标签均受此约束 */
+constexpr int kMaxStepRetry = 5;
+
 // ============================================================
 // 数据模型
 // ============================================================
@@ -132,6 +135,7 @@ struct TestRequest {
     Priority priority = Priority::NORMAL;
     int timeoutMs = 0;                       // 0 表示使用默认值
     bool failFast = false;                   // 首个场景失败即停止
+    int stepRetry = 0;                       // FAILED 步骤的最大重试次数（不含首次）；0 表示不重试
     std::map<std::string, std::string> metadata;
     std::string callbackUrl;                 // 可选的完成回调 URL
     std::string submittedBy;
@@ -146,7 +150,8 @@ struct StepResult {
     TestState state = TestState::PASSED;
     std::string errorMessage;
     std::string stackTrace;
-    double duration = 0.0;  // 秒
+    double duration = 0.0;  // 秒（含所有重试）
+    int attempts = 1;       // 实际执行次数（含首次）；>1 表示发生过重试
     std::vector<std::string> messages;   // Runner 写回的日志
     std::vector<StepResult> conceptSteps;
     bool isConcept = false;
@@ -323,6 +328,7 @@ namespace EventType {
     const std::string SCENARIO_STARTED = "scenario.started";
     const std::string SCENARIO_COMPLETED = "scenario.completed";
     const std::string STEP_STARTED = "step.started";
+    const std::string STEP_RETRY = "step.retry";
     const std::string STEP_COMPLETED = "step.completed";
     const std::string RUNNER_CONNECTING = "runner.connecting";
     const std::string RUNNER_CONNECTED = "runner.connected";

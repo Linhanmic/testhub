@@ -20,6 +20,31 @@ namespace {
 
 std::string joinTags(const std::vector<std::string>& tags) { return StringUtil::join(tags, ","); }
 
+/** 从规范/场景标签解析 retry:N 或 retry-N（含可选的 <...> 包裹） */
+int retryFromTags(const std::vector<std::string>& tags) {
+    int n = 0;
+    for (std::string t : tags) {
+        t = StringUtil::trim(t);
+        if (t.size() >= 2 && t.front() == '<' && t.back() == '>') t = t.substr(1, t.size() - 2);
+        t = StringUtil::toLower(t);
+        if (t.size() > 6 && (StringUtil::startsWith(t, "retry:") || StringUtil::startsWith(t, "retry-"))) {
+            try {
+                int v = std::stoi(t.substr(6));
+                if (v > n) n = v;
+            } catch (...) {
+            }
+        }
+    }
+    return n;
+}
+
+int effectiveStepRetry(const TestRequest& req, const std::vector<std::string>& tags) {
+    int n = std::max(req.stepRetry, retryFromTags(tags));
+    if (n < 0) return 0;
+    if (n > kMaxStepRetry) return kMaxStepRetry;
+    return n;
+}
+
 TestState aggregateState(int failed, int errored, int skipped, int total, bool cancelled) {
     if (cancelled) return TestState::CANCELLED;
     if (errored > 0 && failed == 0) return TestState::TEST_ERROR;
@@ -1214,19 +1239,24 @@ StepResult ExecutionEngine::executeStep(RunContext& ctx, const spec::Step& step,
     StepResult result;
     result.stepText = step.text;
     result.parameterizedText = step.parameterizedText;
+    result.attempts = 1;
     stopScenario = false;
+
+    const int maxRetries = effectiveStepRetry(ctx.request, execCtx.tags);
 
     {
         std::lock_guard<std::recursive_mutex> lock(ctx.runMutex);
         ctx.status.currentStep = step.text;
     }
-    publish(EventType::STEP_STARTED, ctx.testId, {
+    std::map<std::string, std::string> started = {
         {"spec", execCtx.specFile},
         {"scenario", execCtx.scenarioName},
         {"step", step.text},
         {"parameterized_text", step.parameterizedText},
         {"is_concept", step.isConcept ? "true" : "false"}
-    });
+    };
+    if (maxRetries > 0) started["max_retries"] = std::to_string(maxRetries);
+    publish(EventType::STEP_STARTED, ctx.testId, started);
 
     auto start = std::chrono::steady_clock::now();
     std::string specDir = FileUtil::getDirectoryPath(specs_.toAbsoluteInside(execCtx.specFile));
@@ -1262,18 +1292,57 @@ StepResult ExecutionEngine::executeStep(RunContext& ctx, const spec::Step& step,
         req.args = step.args;
         resolveArgs(req.args, dataRow, specDir);
         req.context = execCtx;
-        req.timeoutMs = config_.stepTimeoutMs;
-        // 剩余测试时间不足时收紧步骤超时
-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(ctx.deadline - std::chrono::steady_clock::now()).count();
-        if (remaining > 0 && remaining < req.timeoutMs) req.timeoutMs = static_cast<int>(remaining);
 
-        StepResult rr = runner_.executeStep(req);
-        result.state = rr.state;
-        result.errorMessage = rr.errorMessage;
-        result.stackTrace = rr.stackTrace;
-        result.messages = rr.messages;
-        if (rr.duration > 0) result.duration = rr.duration;
-        stopScenario = (result.state == TestState::FAILED || result.state == TestState::TEST_ERROR);
+        double totalDuration = 0.0;
+        result.attempts = 0;
+        while (true) {
+            if (ctx.cancelled->load() || checkTimeout(ctx)) {
+                if (result.attempts == 0) {
+                    result.attempts = 1;
+                    result.state = ctx.cancelled->load() ? TestState::CANCELLED : TestState::TEST_ERROR;
+                    result.errorMessage = ctx.cancelled->load() ? "Cancelled" : "Test timed out";
+                }
+                stopScenario = true;
+                break;
+            }
+
+            ++result.attempts;
+            req.timeoutMs = config_.stepTimeoutMs;
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 ctx.deadline - std::chrono::steady_clock::now())
+                                 .count();
+            if (remaining > 0 && remaining < req.timeoutMs) req.timeoutMs = static_cast<int>(remaining);
+
+            auto attemptStart = std::chrono::steady_clock::now();
+            StepResult rr = runner_.executeStep(req);
+            double d = rr.duration;
+            if (d <= 0) d = std::chrono::duration<double>(std::chrono::steady_clock::now() - attemptStart).count();
+            totalDuration += d;
+            result.state = rr.state;
+            result.errorMessage = rr.errorMessage;
+            result.stackTrace = rr.stackTrace;
+            result.messages = rr.messages;
+
+            const bool canRetry = result.state == TestState::FAILED
+                                  && result.attempts <= maxRetries
+                                  && !ctx.cancelled->load()
+                                  && !ctx.timedOut.load();
+            if (canRetry) {
+                publish(EventType::STEP_RETRY, ctx.testId, {
+                    {"spec", execCtx.specFile},
+                    {"scenario", execCtx.scenarioName},
+                    {"step", step.text},
+                    {"attempt", std::to_string(result.attempts)},
+                    {"max_retries", std::to_string(maxRetries)},
+                    {"error", result.errorMessage}
+                });
+                continue;
+            }
+            stopScenario = (result.state == TestState::FAILED || result.state == TestState::TEST_ERROR
+                            || result.state == TestState::CANCELLED);
+            break;
+        }
+        result.duration = totalDuration;
     }
 
     if (result.duration <= 0) {
@@ -1285,7 +1354,8 @@ StepResult ExecutionEngine::executeStep(RunContext& ctx, const spec::Step& step,
         {"scenario", execCtx.scenarioName},
         {"step", step.text},
         {"state", testStateToString(result.state)},
-        {"duration", std::to_string(result.duration)}
+        {"duration", std::to_string(result.duration)},
+        {"attempts", std::to_string(result.attempts)}
     };
     if (!result.errorMessage.empty()) data["error"] = result.errorMessage;
     publish(EventType::STEP_COMPLETED, ctx.testId, data);

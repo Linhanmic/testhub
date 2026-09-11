@@ -124,6 +124,7 @@ worker 线程
 - **超时**：测试级 `timeout_ms`（默认 `execution.default_timeout`）与步骤级 `execution.step_timeout`；剩余时间不足时步骤超时自动收紧；超时后剩余步骤标记跳过，测试状态为 `error`。
 - **取消**：`cancel(id)` 对排队任务直接出队；对运行中任务置标志，当前步骤结束后剩余场景/步骤标记为跳过（保留完整步骤列表），状态为 `cancelled`。
 - **fail_fast**：首个失败场景后跳过其余场景。
+- **步骤重试**：请求字段 `step_retry`（0–5）与规范/场景标签 `retry:N` / `retry-N` 取较大值。仅当步骤结果为 `FAILED`（断言失败）时重试，不重试 `TEST_ERROR`、取消或超时。概念步骤的内层各自独立重试。每次重试发布 `step.retry`（`attempt`、`max_retries`、`error`），最终 `step.completed` 带 `attempts`（含首次）。Mock Runner 步骤文案含 `flaky` 时第一次失败、之后通过。
 - **重跑**：`rerun(id, failed_only)` 复制原请求；`failed_only` 时把失败场景名写入 `scenarios` 过滤。
 - **历史**：`records_` 保留最近 `execution.history_limit` 条已完成记录；`DELETE /tests` 清空。
 - **持久化**：`ResultStore`（`src/engine/result_store.*`）在测试进入终态时把 `{request, status, result, resolved_specs}` 写入 `<results_dir>/<test_id>.json`（临时文件 + rename 原子替换）；`start()` 时回放目录中的记录到 `records_` 与统计，并按 `history_limit` 裁剪；删除/清空历史同步删除文件；损坏文件跳过并告警。`results_dir` 为空则仅保存在内存。
@@ -213,7 +214,7 @@ class Runner {                      // 抽象接口
 | 路由 | 功能 |
 |------|------|
 | `#/dashboard` | 统计卡片、通过率环图、最近测试、实时事件摘要 |
-| `#/run` | 提交表单（规范多选、标签表达式、场景过滤、优先级、环境、超时、fail_fast），实时 curl 预览 |
+| `#/run` | 提交表单（规范多选、标签表达式、场景过滤、优先级、环境、超时、fail_fast、步骤重试、并行流），实时 curl 预览 |
 | `#/tests` / `#/tests/{id}` | 列表（状态筛选、取消/重跑/删除）；详情页：状态卡、**运行中由事件流构建的实时执行树**、完成后的结果树（上下文/步骤/清理、概念展开、数据行参数替换、消息与堆栈）、请求信息、事件面板 |
 | `#/specs` / `#/specs/{file}` | 规范列表（校验全部、重新加载、新建）；详情：结构视图（标出 Runner 未实现的步骤）、源码、编辑器（校验/保存/删除） |
 | `#/runner` | Runner 状态、已实现步骤、重启 |
@@ -237,11 +238,13 @@ struct TestRequest {
     Priority priority = Priority::NORMAL;
     int timeoutMs = 0;                    // 0 = 默认
     bool failFast = false;
+    int stepRetry = 0;                    // FAILED 步骤最大重试次数，上限 5
+    int parallelStreams = 1;
     std::map<std::string, std::string> metadata;
     std::string callbackUrl;              // 完成后 POST 摘要（见 3.6a）
 };
 
-struct StepResult     { stepText, parameterizedText, state, errorMessage, stackTrace, duration,
+struct StepResult     { stepText, parameterizedText, state, errorMessage, stackTrace, duration, attempts,
                         messages[], isConcept, conceptSteps[] };
 struct ScenarioResult { scenarioName, tags[], lineNumber, dataRowIndex, dataRow{}, state,
                         contextSteps[], stepResults[], teardownSteps[], errorMessage, duration };
@@ -264,7 +267,7 @@ JSON 序列化位于 `src/model/json_convert.h`，字段名为 snake_case（`spe
 | `test.progress` | `progress`, `current_spec`, `current_scenario`, `current_step`, `executed_scenarios`, `total_scenarios` |
 | `spec.started` / `spec.completed` | `spec`, `name`, `scenarios`, `tags`, `state`, `duration`, `error` |
 | `scenario.started` / `scenario.completed` | `spec`, `scenario`, `tags`, `steps`, `data_row`, `state`, `duration`, `error` |
-| `step.started` / `step.completed` | `spec`, `scenario`, `step`, `parameterized_text`, `is_concept`, `state`, `duration`, `error` |
+| `step.started` / `step.retry` / `step.completed` | `spec`, `scenario`, `step`, `parameterized_text`, `is_concept`, `state`, `duration`, `error`, `attempts`, `attempt`, `max_retries` |
 | `runner.connecting` / `runner.connected` / `runner.disconnected` / `runner.error` / `runner.log` | `language`, `slot`（池中槽位序号）, `detail` / `message`, `level` |
 | `queue.updated` | `queue_size`, `action`（enqueued/dequeued/cancelled） |
 | `specs.reloaded` | `source`（manual / api / watcher）；api：`file`, `action`（created/updated/deleted）；watcher：`created`, `updated`, `deleted` 计数、`files`、`concepts`、`concepts_reloaded` |
@@ -278,7 +281,7 @@ JSON 序列化位于 `src/model/json_convert.h`，字段名为 snake_case（`spe
 
 ```http
 POST /api/v1/tests
-{"spec_files":["login.spec"],"tags":["smoke & !slow"],"priority":"high","fail_fast":true,"timeout_ms":60000}
+{"spec_files":["login.spec"],"tags":["smoke & !slow"],"priority":"high","fail_fast":true,"timeout_ms":60000,"step_retry":1}
 
 HTTP/1.1 202 Accepted
 Location: /api/v1/tests/test-20260910-142940-001
@@ -386,8 +389,8 @@ cmake/EmbedResources.cmake
 
 ## 8. 质量保障
 
-- **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405、请求过滤器；鉴权策略（读/写、凭据来源、常量时间比较）；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话、**parallel_streams 场景重叠且结果保序**）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）；报表（JUnit 结构与计数、转义、空结果、HTML 自包含）；规范目录监控；Runner 池（注入假 Runner：并行分配与会话绑定、阻塞等待、逐槽重启与预算、健康槽位优先、并发安全收缩、停止/重启生命周期、**reserveSlots 原子预约**）。
-- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）、Bearer Token（写保护与全保护两种模式、WebSocket 查询参数）、WebSocket 秒连秒断压力回归、目录监控端到端、**真实 Python Runner 池**（两个进程并行执行两个 0.8 s 的测试总耗时 < 1.5 s；`kill -9` 其中一个进程后按需自愈且孤儿进程组被清理；手动重启替换全部进程；无 `python3` 时跳过）、**真实 Node.js Runner**（同一套 login/calculator/checkout 规范全部通过；断言失败带回 `AssertionError` 堆栈；未实现步骤报 error；无 `node` 时跳过）、**parallel_streams**（单个测试的两个 0.8 s 场景拆到两个 Python 进程，总耗时 < 1.5 s，结果顺序与规范一致）、**自举**（`selfcheck.spec` 经 Python / Node 调用本进程 HTTP API，并断言入队的 `calculator.spec` 子测试随后通过）。
+- **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405、请求过滤器；鉴权策略（读/写、凭据来源、常量时间比较）；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话、**parallel_streams 场景重叠且结果保序**、**step_retry / retry:N 仅重试 FAILED**）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）；报表（JUnit 结构与计数、转义、空结果、HTML 自包含）；规范目录监控；Runner 池（注入假 Runner：并行分配与会话绑定、阻塞等待、逐槽重启与预算、健康槽位优先、并发安全收缩、停止/重启生命周期、**reserveSlots 原子预约**）。
+- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）、Bearer Token（写保护与全保护两种模式、WebSocket 查询参数）、WebSocket 秒连秒断压力回归、目录监控端到端、**真实 Python Runner 池**（两个进程并行执行两个 0.8 s 的测试总耗时 < 1.5 s；`kill -9` 其中一个进程后按需自愈且孤儿进程组被清理；手动重启替换全部进程；无 `python3` 时跳过）、**真实 Node.js Runner**（同一套 login/calculator/checkout 规范全部通过；断言失败带回 `AssertionError` 堆栈；未实现步骤报 error；无 `node` 时跳过）、**parallel_streams**（单个测试的两个 0.8 s 场景拆到两个 Python 进程，总耗时 < 1.5 s，结果顺序与规范一致）、**步骤重试**（mock flaky 步骤 `step_retry=1` 后通过且 `attempts=2`；越界 400）、**自举**（`selfcheck.spec` 经 Python / Node 调用本进程 HTTP API，并断言入队的 `calculator.spec` 子测试随后通过）。
 - **并发正确性**：所有线程句柄的赋值与检查共享同一把锁（WebSocket 读线程见 `Connection::readerMutex`）；停止流程在持锁状态下改标志再 `notify`，避免丢失唤醒；终态记录先落盘再对外可见。排查偶发问题时用 ThreadSanitizer 构建（`-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"`）运行集成测试，当前零告警。
 - **协议测试**：`python_runner_protocol`（子进程启动 Python Runner，验证 ping/get_steps/execute_step/hook/kill 与错误路径）；`node_runner_protocol`（同样覆盖 async 步骤等待、`console.log` 不污染协议通道、缺失实现目录、非法 JSON 不杀死进程）。
 - **CI**：Ubuntu（g++、clang++）与 macOS，`-Wall -Wextra -Wpedantic -Werror`，`ctest`，二进制冒烟（curl），独立运行 Python / Node 协议测试；CI 安装 Python 3.x 与 Node.js 22。
