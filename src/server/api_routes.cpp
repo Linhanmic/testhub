@@ -470,6 +470,94 @@ void TestHub::registerApiRoutes() {
         return HttpResponse::json(200, j);
     });
 
+    // ---------------- 测试计划（cron，UTC） ----------------
+    auto scheduleFromBody = [](const Json& body, Schedule& s, bool& hasRequest, std::string& error) -> bool {
+        if (body["name"].isString()) s.name = body["name"].asString();
+        if (body["cron"].isString()) s.cron = body["cron"].asString();
+        if (body["enabled"].isBool()) s.enabled = body["enabled"].asBool();
+        if (body["skip_if_running"].isBool()) s.skipIfRunning = body["skip_if_running"].asBool();
+        hasRequest = body["request"].isObject();
+        if (hasRequest) {
+            if (!testRequestFromJson(body["request"], s.request, error)) return false;
+        } else if (body["spec_files"].isArray() || body["specs"].isArray() || body["tags"].isArray() ||
+                   body["scenarios"].isArray()) {
+            hasRequest = true;
+            if (!testRequestFromJson(body, s.request, error)) return false;
+        }
+        return true;
+    };
+
+    http.get("/api/v1/schedules", [this](const HttpRequest&) {
+        Json arr = Json::array();
+        for (const auto& s : scheduler_.list()) arr.push(Scheduler::toJson(s));
+        Json j = Json::object();
+        j["schedules"] = arr;
+        j["count"] = static_cast<int>(arr.size());
+        SchedulerStats st = scheduler_.stats();
+        j["enabled"] = st.enabled;
+        return HttpResponse::json(200, j);
+    });
+
+    http.post("/api/v1/schedules", [this, scheduleFromBody](const HttpRequest& req) {
+        Json body = parseBody(req);
+        Schedule s;
+        bool hasRequest = false;
+        std::string error;
+        if (!scheduleFromBody(body, s, hasRequest, error)) return HttpResponse::error(400, error);
+        if (s.cron.empty()) return HttpResponse::error(400, "cron is required");
+        Schedule created = scheduler_.create(s, error);
+        if (!error.empty() || created.id.empty()) {
+            return HttpResponse::error(400, error.empty() ? "failed to create schedule" : error);
+        }
+        return HttpResponse::json(201, Scheduler::toJson(created));
+    });
+
+    http.get("/api/v1/schedules/{id}", [this](const HttpRequest& req) {
+        auto s = scheduler_.get(req.param("id"));
+        if (!s) return HttpResponse::error(404, "Schedule not found: " + req.param("id"));
+        return HttpResponse::json(200, Scheduler::toJson(*s));
+    });
+
+    http.put("/api/v1/schedules/{id}", [this, scheduleFromBody](const HttpRequest& req) {
+        std::string id = req.param("id");
+        auto existing = scheduler_.get(id);
+        if (!existing) return HttpResponse::error(404, "Schedule not found: " + id);
+        Json body = parseBody(req);
+        Schedule patch = *existing;
+        bool hasRequest = false;
+        std::string error;
+        if (!scheduleFromBody(body, patch, hasRequest, error)) return HttpResponse::error(400, error);
+        if (!scheduler_.update(id, patch, hasRequest, error)) {
+            return HttpResponse::error(error.find("not found") != std::string::npos ? 404 : 400, error);
+        }
+        return HttpResponse::json(200, Scheduler::toJson(*scheduler_.get(id)));
+    });
+
+    http.del("/api/v1/schedules/{id}", [this](const HttpRequest& req) {
+        if (!scheduler_.remove(req.param("id"))) return HttpResponse::error(404, "Schedule not found: " + req.param("id"));
+        Json j = Json::object();
+        j["removed"] = true;
+        return HttpResponse::json(200, j);
+    });
+
+    http.post("/api/v1/schedules/{id}/run", [this](const HttpRequest& req) {
+        std::string error;
+        std::string testId = scheduler_.fireNow(req.param("id"), error);
+        if (!error.empty() && testId.empty()) {
+            int code = 400;
+            if (error.find("not found") != std::string::npos) code = 404;
+            else if (error.find("still running") != std::string::npos) code = 409;
+            return HttpResponse::error(code, error);
+        }
+        Json j = Json::object();
+        j["test_id"] = testId;
+        j["schedule_id"] = req.param("id");
+        j["status"] = "queued";
+        HttpResponse r = HttpResponse::json(202, j);
+        r.headers["Location"] = "/api/v1/tests/" + testId;
+        return r;
+    });
+
     // ---------------- 事件 ----------------
     http.get("/api/v1/events", [](const HttpRequest& req) {
         size_t limit = parseSize(req.query("limit"), 100, 1000);

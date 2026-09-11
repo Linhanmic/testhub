@@ -298,6 +298,7 @@ textarea.editor { min-height: 360px; }
 .feed .type.runner { color: var(--fail); }
 .feed .type.callback { color: var(--pass); }
 .feed .type.specs { color: var(--accent-text); }
+.feed .type.schedule { color: var(--warn); }
 .feed .detail { color: var(--text); word-break: break-word; }
 .feed .detail .k { color: var(--text-muted); }
 
@@ -310,6 +311,11 @@ textarea.editor { min-height: 360px; }
 .alert.warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 30%, transparent); color: var(--warn); }
 .alert.ok { background: var(--pass-soft); border-color: color-mix(in srgb, var(--pass) 30%, transparent); color: var(--pass); }
 .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+search.toolbar { display: flex; }
+details.advanced { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; background: var(--surface-2); }
+details.advanced > summary { cursor: pointer; font-weight: 550; color: var(--text-muted); }
+details.advanced[open] > summary { margin-bottom: 8px; color: var(--text); }
+input.mono { font-family: var(--mono); }
 .toolbar select, .toolbar input { width: auto; }
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
 .tabs button { background: none; border: none; border-bottom: 2px solid transparent; padding: 8px 12px; font: inherit; font-weight: 550; color: var(--text-muted); cursor: pointer; }

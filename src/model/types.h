@@ -339,6 +339,12 @@ namespace EventType {
     const std::string SPECS_RELOADED = "specs.reloaded";
     const std::string CALLBACK_DELIVERED = "callback.delivered";
     const std::string CALLBACK_FAILED = "callback.failed";
+    const std::string SCHEDULE_CREATED = "schedule.created";
+    const std::string SCHEDULE_UPDATED = "schedule.updated";
+    const std::string SCHEDULE_DELETED = "schedule.deleted";
+    const std::string SCHEDULE_TRIGGERED = "schedule.triggered";
+    const std::string SCHEDULE_SKIPPED = "schedule.skipped";
+    const std::string SCHEDULE_ERROR = "schedule.error";
 }
 
 // ============================================================

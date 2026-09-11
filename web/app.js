@@ -189,7 +189,7 @@
   // ------------------------------------------------------------
   const routes = {};
   let cleanup = null;
-  const PAGE_TITLES = { dashboard: '总览', run: '提交测试', tests: '测试记录', specs: '规范文件', runner: 'Runner', events: '事件流' };
+  const PAGE_TITLES = { dashboard: '总览', run: '提交测试', tests: '测试记录', schedules: '测试计划', specs: '规范文件', runner: 'Runner', events: '事件流' };
   function navigate() {
     const hash = location.hash.replace(/^#\/?/, '') || 'dashboard';
     const [name, ...rest] = hash.split('/');
@@ -221,7 +221,7 @@
     const d = ev.data || {};
     const parts = [];
     if (ev.test_id) parts.push(`<a href="#/tests/${esc(ev.test_id)}">${esc(ev.test_id)}</a>`);
-    for (const k of ['state', 'spec', 'scenario', 'step', 'progress', 'detail', 'message', 'error', 'name', 'url', 'status', 'attempts', 'attempt', 'max_retries', 'source', 'action', 'file', 'files', 'created', 'updated', 'deleted', 'slot', 'stream']) {
+    for (const k of ['state', 'spec', 'scenario', 'step', 'progress', 'detail', 'message', 'error', 'name', 'url', 'status', 'attempts', 'attempt', 'max_retries', 'source', 'action', 'file', 'files', 'created', 'updated', 'deleted', 'slot', 'stream', 'schedule_id', 'cron', 'reason']) {
       if (d[k] !== undefined && d[k] !== '') {
         let v = d[k];
         if ((k === 'created' || k === 'updated' || k === 'deleted') && v === '0') continue;
@@ -310,7 +310,7 @@
           <li><span>只看失败（结果树）</span><span class="keys"><kbd>f</kbd></span></li>
           <li><span>暂停 / 继续事件流</span><span class="keys"><kbd>p</kbd></span></li>
           <li><span>总览 / 提交 / 测试</span><span class="keys"><kbd>g</kbd> <kbd>d</kbd> · <kbd>g</kbd> <kbd>r</kbd> · <kbd>g</kbd> <kbd>t</kbd></span></li>
-          <li><span>规范 / Runner / 事件</span><span class="keys"><kbd>g</kbd> <kbd>s</kbd> · <kbd>g</kbd> <kbd>n</kbd> · <kbd>g</kbd> <kbd>e</kbd></span></li>
+          <li><span>计划 / 规范 / Runner / 事件</span><span class="keys"><kbd>g</kbd> <kbd>c</kbd> · <kbd>g</kbd> <kbd>s</kbd> · <kbd>g</kbd> <kbd>n</kbd> · <kbd>g</kbd> <kbd>e</kbd></span></li>
           <li><span>关闭对话框</span><span class="keys"><kbd>Esc</kbd></span></li>
         </ul>
         <div class="flex" style="justify-content:flex-end"><button class="btn primary" type="button" data-x="close">关闭</button></div>
@@ -380,6 +380,7 @@
               <dt>事件总数</dt><dd>${status.events_published}</dd>
               <dt>概念</dt><dd>${status.concepts}</dd>
               ${status.spec_watcher ? `<dt>规范监控</dt><dd id="st-watch" title="${status.spec_watcher.last_change_at ? `最近变更 ${esc(fmtTime(status.spec_watcher.last_change_at))}` : '尚无变更'}">${watcherSummary(status.spec_watcher)}</dd>` : ''}
+              ${status.scheduler ? `<dt>测试计划</dt><dd id="st-sched">${schedulerSummary(status.scheduler)}</dd>` : ''}
               <dt>历史记录</dt><dd>${s.history_size}</dd>
               ${status.callbacks ? `<dt>回调</dt><dd id="st-callbacks">${status.callbacks.enabled ? `${status.callbacks.delivered} 送达${status.callbacks.failed ? ` · <span style="color:var(--fail)">${status.callbacks.failed} 失败</span>` : ''}${status.callbacks.pending ? ` · ${status.callbacks.pending} 待发` : ''}` : '已禁用'}</dd>` : ''}
             </dl></div>
@@ -409,6 +410,8 @@
             wEl.innerHTML = watcherSummary(w);
             if (w.last_change_at) wEl.title = `最近变更 ${fmtTime(w.last_change_at)}`;
           }
+          const sch = st.scheduler, schEl = $('#st-sched');
+          if (sch && schEl) schEl.innerHTML = schedulerSummary(sch);
           const r = st.runner || {}, pEl = $('#st-pool'), sEl = $('#st-pool-slots');
           if (pEl) pEl.innerHTML = poolSummary(r);
           if (sEl) sEl.innerHTML = poolSlots(r);
@@ -422,7 +425,7 @@
       feed.insertAdjacentHTML('afterbegin', renderEvent(ev));
       while (feed.children.length > 150) feed.lastElementChild.remove();
       $('#ev-count').textContent = `+${++count}`;
-      if (/^(test|queue|runner|callback|specs)\./.test(ev.event)) scheduleRefresh();
+      if (/^(test|queue|runner|callback|specs|schedule)\./.test(ev.event)) scheduleRefresh();
     });
     return () => { off(); if (refreshTimer) clearTimeout(refreshTimer); };
   };
@@ -447,6 +450,14 @@
     if (!w.enabled) return '已关闭';
     const every = w.interval_ms % 1000 === 0 ? `${w.interval_ms / 1000} s` : `${w.interval_ms} ms`;
     return `每 ${every} · ${w.tracked_files} 个文件${w.changes ? ` · ${w.changes} 次变更` : ''}`;
+  }
+
+  function schedulerSummary(s) {
+    if (!s) return '—';
+    const label = s.enabled
+      ? `${s.enabled_count || 0}/${s.count || 0} 已启用${s.fires ? ` · ${s.fires} 次触发` : ''}`
+      : `已关闭${s.count ? ` · ${s.count} 个计划` : ''}`;
+    return `<a href="#/schedules">${label}</a>`;
   }
 
   function donut(items) {
@@ -897,6 +908,278 @@
   };
 
   // ------------------------------------------------------------
+  // 页面：测试计划（UTC cron）
+  // ------------------------------------------------------------
+  const CRON_PRESETS = [
+    ['', '自定义'],
+    ['* * * * *', '每分钟'],
+    ['*/5 * * * *', '每 5 分钟'],
+    ['*/15 * * * *', '每 15 分钟'],
+    ['0 * * * *', '每小时（整点）'],
+    ['@hourly', '@hourly'],
+    ['@daily', '@daily（00:00 UTC）'],
+    ['@weekly', '@weekly（周日 00:00 UTC）'],
+    ['@monthly', '@monthly（每月 1 日）'],
+  ];
+
+  function fmtUntil(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (isNaN(d)) return esc(iso);
+    const diff = (d.getTime() - Date.now()) / 1000;
+    if (diff < 0) return rel(iso);
+    if (diff < 60) return `${Math.round(diff)} 秒后`;
+    if (diff < 3600) return `${Math.round(diff / 60)} 分钟后`;
+    if (diff < 86400) return `${Math.round(diff / 3600)} 小时后`;
+    return `${Math.round(diff / 86400)} 天后`;
+  }
+
+  function scheduleHaystack(s) {
+    const req = s.request || {};
+    return [s.id, s.name, s.cron, (req.spec_files || []).join(' '), (req.tags || []).join(' '),
+      s.last_test_id, s.last_error].join(' ').toLowerCase();
+  }
+
+  function renderScheduleRows(plans) {
+    if (!plans.length) {
+      return '<div class="empty">还没有测试计划。在下方填写 cron 与规范后创建，或用「立即运行」试一次。</div>';
+    }
+    return `<div class="table-wrap"><table><thead><tr><th>启用</th><th>名称</th><th>Cron（UTC）</th><th>规范</th><th>下次</th><th>最近</th><th></th></tr></thead>
+      <tbody id="sched-rows">${plans.map((s) => {
+        const req = s.request || {};
+        const specs = (req.spec_files || []).join(', ') || '（全部）';
+        const last = s.last_test_id
+          ? `<a href="#/tests/${esc(s.last_test_id)}">${esc(s.last_test_id)}</a>${s.last_run_at ? `<div class="muted small">${esc(rel(s.last_run_at))}</div>` : ''}`
+          : '<span class="muted">尚未运行</span>';
+        return `<tr data-haystack="${esc(scheduleHaystack(s))}">
+          <td><label class="check" title="${s.enabled ? '停用' : '启用'}">
+            <input type="checkbox" data-act="enable" data-id="${esc(s.id)}" ${s.enabled ? 'checked' : ''}>
+            <span class="visually-hidden">启用 ${esc(s.name || s.id)}</span></label></td>
+          <td><div>${esc(s.name || s.id)}</div><div class="mono muted small">${esc(s.id)}</div>
+            ${s.last_error ? `<div class="muted small" style="color:var(--fail)">${esc(s.last_error)}</div>` : ''}
+            ${s.skip_if_running === false ? '<div class="tag">允许重叠</div>' : ''}</td>
+          <td class="mono">${esc(s.cron)}</td>
+          <td class="truncate" style="max-width:220px" title="${esc(specs)}">${esc(specs)}${(req.tags || []).length ? `<div>${tags(req.tags)}</div>` : ''}</td>
+          <td class="nowrap" title="${esc(fmtTime(s.next_run_at))}">${s.enabled ? fmtUntil(s.next_run_at) : '<span class="muted">已停用</span>'}</td>
+          <td>${last}<div class="muted small">${s.run_count || 0} 次${s.skip_count ? ` · 跳过 ${s.skip_count}` : ''}</div></td>
+          <td class="right nowrap"><span class="btn-group">
+            <button class="btn sm" type="button" data-act="edit" data-id="${esc(s.id)}">编辑</button>
+            <button class="btn sm primary" type="button" data-act="run" data-id="${esc(s.id)}">立即运行</button>
+            <button class="btn sm danger" type="button" data-act="del" data-id="${esc(s.id)}">删除</button>
+          </span></td>
+        </tr>`;
+      }).join('')}</tbody></table></div>`;
+  }
+
+  routes.schedules = async (main) => {
+    const [data, specs] = await Promise.all([api('/schedules'), api('/specs')]);
+    const plans = data.schedules || [];
+    const schedulerOn = !!data.enabled;
+    let editingId = null;
+    let refreshTimer = null;
+
+    main.innerHTML = `${header('测试计划',
+      schedulerOn
+        ? `按 UTC cron 周期性提交 · ${plans.length} 个计划 · ${plans.filter((p) => p.enabled).length} 个已启用`
+        : '调度器已关闭：cron 不会自动触发，仍可创建计划并立即运行',
+      `<a class="btn" href="#/run">▶ 提交一次</a>`)}
+      ${schedulerOn ? '' : '<div class="alert warn">守护进程以 <code>--no-scheduler</code> 启动，或配置 <code>scheduler.enabled=false</code>。计划会保存，但只有「立即运行」会提交测试。</div>'}
+      <search class="toolbar">
+        <label class="grow" for="sched-q"><span class="visually-hidden">搜索测试计划</span>
+          <input type="search" id="sched-q" placeholder="搜索名称、cron 或规范…" autocomplete="off"></label>
+        <span class="muted small" id="sched-count">${plans.length} 个</span>
+      </search>
+      <div class="card mb" id="sched-table">${renderScheduleRows(plans)}</div>
+      <div class="grid grid-main">
+        <form class="card" id="sched-form"><div class="card-body form">
+          <div class="flex" style="justify-content:space-between"><h2 id="sched-form-title">新建计划</h2>
+            <button class="btn sm hidden" type="button" id="sched-cancel-edit">取消编辑</button></div>
+          <label class="field">名称 <span class="help">可选，默认使用计划 ID</span>
+            <input type="text" name="name" placeholder="例如：每小时冒烟" autocomplete="off"></label>
+          <div class="form-row">
+            <label class="field">常用模板
+              <select id="cron-preset" aria-label="cron 常用模板">
+                ${CRON_PRESETS.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}
+              </select></label>
+            <label class="field">Cron 表达式 <span class="help" id="cron-help">五字段 UTC：分 时 日 月 星期，支持 <code>*</code> <code>,</code> <code>-</code> <code>/</code> 与 <code>@hourly</code> 等</span>
+              <input class="mono" type="text" name="cron" id="sched-cron" required placeholder="0 * * * *" spellcheck="false" autocomplete="off" aria-describedby="cron-help"></label>
+          </div>
+          <div class="field" style="display:flex;flex-direction:column;gap:5px">
+            <div class="flex" style="justify-content:space-between"><b>规范文件 <span class="help muted" style="font-weight:400">不选则运行全部</span></b>
+              <span class="btn-group"><button type="button" class="btn sm" id="sched-sel-all">全选</button><button type="button" class="btn sm" id="sched-sel-none">清空</button></span></div>
+            <div class="spec-picker">${specs.specs.map((s) => `<label><input type="checkbox" name="spec" value="${esc(s.file)}" ${s.valid ? '' : 'disabled'}>
+              <span class="mono">${esc(s.file)}</span><span class="muted">${esc(s.heading)}</span><span class="meta">${s.scenario_count} 场景${s.valid ? '' : ' · <span style="color:var(--fail)">无效</span>'}</span></label>`).join('') || '<div class="empty">规范目录为空</div>'}</div>
+          </div>
+          <div class="form-row">
+            <label class="field">标签表达式<input type="text" name="tags" placeholder="smoke" autocomplete="off"></label>
+            <label class="field">场景名过滤<input type="text" name="scenarios" placeholder="Successful login" autocomplete="off"></label>
+          </div>
+          <details class="advanced">
+            <summary>高级选项</summary>
+            <div class="form-row mt">
+              <label class="field">超时 (ms)<input type="number" name="timeout_ms" value="0" min="0" step="1000"></label>
+              <label class="field">步骤重试<input type="number" name="step_retry" value="0" min="0" max="5" step="1"></label>
+            </div>
+            <label class="check"><input type="checkbox" name="fail_fast"> 首个失败场景后停止</label>
+          </details>
+          <label class="check"><input type="checkbox" name="enabled" checked> 创建后立即启用</label>
+          <label class="check"><input type="checkbox" name="skip_if_running" checked> 上一轮仍在运行时跳过（避免堆积）</label>
+          <div class="flex"><button class="btn primary" type="submit" id="sched-save">＋ 创建计划</button><span class="muted small" id="sched-msg"></span></div>
+        </div></form>
+        <div class="card"><div class="card-header"><h2>说明</h2></div><div class="card-body">
+          <p class="muted small">Cron 按 <b>UTC</b> 求值，与 API 时间戳一致。守护进程每秒轮询到期计划，同一分钟只触发一次；重启后根据落盘的 <code>last_fired_minute</code> 不会双发。</p>
+          <p class="muted small mt">提交时 <code>submitted_by</code> 为 <code>schedule:&lt;id&gt;</code>，元数据带 <code>schedule_id</code>。事件：<code>schedule.triggered</code> / <code>skipped</code> / <code>error</code>。</p>
+          <pre class="code-view mono mt" tabindex="0"><code>curl -X POST ${esc(location.origin)}/api/v1/schedules \\
+  -H 'Content-Type: application/json' \\
+  -d '{"name":"hourly","cron":"@hourly","spec_files":["login.spec"]}'</code></pre>
+        </div></div>
+      </div>`;
+
+    const form = $('#sched-form');
+    const table = $('#sched-table');
+    const el = (n) => form.elements[n];
+    const applyFilter = () => {
+      const q = ($('#sched-q').value || '').trim().toLowerCase();
+      const rows = table.querySelectorAll('#sched-rows tr');
+      let shown = 0;
+      rows.forEach((tr) => {
+        const hide = !!(q && !(tr.dataset.haystack || '').includes(q));
+        tr.hidden = hide;
+        if (!hide) shown++;
+      });
+      const n = rows.length;
+      $('#sched-count').textContent = q ? `显示 ${shown} / ${n} 个` : `${n} 个`;
+    };
+    $('#sched-q').addEventListener('input', applyFilter);
+
+    const buildBody = () => {
+      const fd = new FormData(form);
+      const body = {
+        name: (fd.get('name') || '').trim(),
+        cron: (fd.get('cron') || '').trim(),
+        enabled: !!fd.get('enabled'),
+        skip_if_running: !!fd.get('skip_if_running'),
+        spec_files: fd.getAll('spec'),
+      };
+      const t = (fd.get('tags') || '').split(',').map((s) => s.trim()).filter(Boolean); if (t.length) body.tags = t;
+      const sc = (fd.get('scenarios') || '').split(',').map((s) => s.trim()).filter(Boolean); if (sc.length) body.scenarios = sc;
+      const to = parseInt(fd.get('timeout_ms') || '0', 10); if (to > 0) body.timeout_ms = to;
+      const retry = parseInt(fd.get('step_retry') || '0', 10); if (retry > 0) body.step_retry = retry;
+      if (fd.get('fail_fast')) body.fail_fast = true;
+      return body;
+    };
+
+    const setEditing = (s) => {
+      editingId = s ? s.id : null;
+      $('#sched-form-title').textContent = s ? `编辑 ${s.name || s.id}` : '新建计划';
+      $('#sched-save').textContent = s ? '保存修改' : '＋ 创建计划';
+      $('#sched-cancel-edit').classList.toggle('hidden', !s);
+      const req = (s && s.request) || {};
+      el('name').value = s ? (s.name || '') : '';
+      el('cron').value = s ? (s.cron || '') : '';
+      $('#cron-preset').value = CRON_PRESETS.some((p) => p[0] === el('cron').value) ? el('cron').value : '';
+      el('enabled').checked = s ? !!s.enabled : true;
+      el('skip_if_running').checked = s ? s.skip_if_running !== false : true;
+      el('tags').value = (req.tags || []).join(', ');
+      el('scenarios').value = (req.scenarios || []).join(', ');
+      el('timeout_ms').value = req.timeout_ms || 0;
+      el('step_retry').value = req.step_retry || 0;
+      el('fail_fast').checked = !!req.fail_fast;
+      const selected = new Set(req.spec_files || []);
+      form.querySelectorAll('input[name=spec]').forEach((c) => { c.checked = selected.has(c.value); });
+      if (s) form.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    };
+
+    $('#cron-preset').addEventListener('change', (e) => {
+      if (e.target.value) el('cron').value = e.target.value;
+    });
+    el('cron').addEventListener('input', () => {
+      const v = el('cron').value.trim();
+      $('#cron-preset').value = CRON_PRESETS.some((p) => p[0] === v) ? v : '';
+    });
+    $('#sched-sel-all').onclick = () => form.querySelectorAll('input[name=spec]:not(:disabled)').forEach((c) => { c.checked = true; });
+    $('#sched-sel-none').onclick = () => form.querySelectorAll('input[name=spec]').forEach((c) => { c.checked = false; });
+    $('#sched-cancel-edit').onclick = () => setEditing(null);
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = $('#sched-save'); btn.disabled = true;
+      $('#sched-msg').textContent = '';
+      try {
+        const body = buildBody();
+        if (!body.cron) throw new Error('cron 不能为空');
+        if (editingId) {
+          await api(`/schedules/${encodeURIComponent(editingId)}`, { method: 'PUT', body });
+          toast('计划已更新', 'ok');
+        } else {
+          const r = await api('/schedules', { method: 'POST', body });
+          toast(`已创建 ${r.name || r.id}`, 'ok');
+        }
+        navigate();
+      } catch (err) {
+        $('#sched-msg').textContent = err.message;
+        $('#sched-msg').style.color = 'var(--fail)';
+        toast(err.message, 'error');
+      } finally { btn.disabled = false; }
+    });
+
+    table.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button[data-act]');
+      if (!btn) return;
+      const id = btn.dataset.id;
+      if (btn.dataset.act === 'edit') {
+        const s = plans.find((p) => p.id === id);
+        if (s) setEditing(s);
+        return;
+      }
+      if (btn.dataset.act === 'run') {
+        btn.disabled = true;
+        try {
+          const r = await api(`/schedules/${encodeURIComponent(id)}/run`, { method: 'POST' });
+          toast(`已提交 ${r.test_id}`, 'ok');
+          location.hash = `#/tests/${r.test_id}`;
+        } catch (err) { toast(err.message, 'error'); }
+        finally { btn.disabled = false; }
+        return;
+      }
+      if (btn.dataset.act === 'del') {
+        const s = plans.find((p) => p.id === id);
+        if (!(await confirmDialog('删除计划', `确定删除「${s ? s.name : id}」？不会取消已在跑的测试。`))) return;
+        try { await api(`/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' }); toast('已删除', 'ok'); navigate(); }
+        catch (err) { toast(err.message, 'error'); }
+      }
+    });
+    table.addEventListener('change', async (e) => {
+      const cb = e.target.closest('input[data-act=enable]');
+      if (!cb) return;
+      cb.disabled = true;
+      try {
+        await api(`/schedules/${encodeURIComponent(cb.dataset.id)}`, { method: 'PUT', body: { enabled: cb.checked } });
+        toast(cb.checked ? '已启用' : '已停用', 'ok');
+        navigate();
+      } catch (err) {
+        cb.checked = !cb.checked;
+        toast(err.message, 'error');
+      } finally { cb.disabled = false; }
+    });
+
+    const off = live.on((ev) => {
+      if (!/^schedule\./.test(ev.event) && ev.event !== 'test.completed') return;
+      if (refreshTimer) return;
+      refreshTimer = setTimeout(async () => {
+        refreshTimer = null;
+        try {
+          const fresh = await api('/schedules');
+          plans.splice(0, plans.length, ...(fresh.schedules || []));
+          table.innerHTML = renderScheduleRows(plans);
+          applyFilter();
+        } catch {}
+      }, 400);
+    });
+    return () => { off(); if (refreshTimer) clearTimeout(refreshTimer); };
+  };
+
+  // ------------------------------------------------------------
   // 页面：规范文件
   // ------------------------------------------------------------
   function highlightSpec(text) {
@@ -1176,7 +1459,7 @@
     }
     if (goChord && Date.now() - goChord < 800) {
       goChord = null;
-      const map = { d: '#/dashboard', h: '#/dashboard', r: '#/run', t: '#/tests', s: '#/specs', n: '#/runner', e: '#/events' };
+      const map = { d: '#/dashboard', h: '#/dashboard', r: '#/run', t: '#/tests', c: '#/schedules', s: '#/specs', n: '#/runner', e: '#/events' };
       if (map[e.key]) { e.preventDefault(); location.hash = map[e.key]; }
     } else {
       goChord = null;

@@ -6,6 +6,7 @@
 #pragma once
 
 #include "engine/execution_engine.h"
+#include "engine/scheduler.h"
 #include "event/event_bus.h"
 #include "model/types.h"
 #include "notify/callback_notifier.h"
@@ -65,6 +66,11 @@ struct TestHubConfig {
     std::string resultsDir = "data/results";   // 结果持久化目录；空表示禁用
     std::map<std::string, std::string> environment;
 
+    // 测试计划（cron，UTC）
+    bool schedulerEnabled = true;
+    int schedulerIntervalMs = 1000;
+    std::string schedulesDir = "data/schedules";  // 空表示仅内存
+
     // 回调通知（callback_url）
     bool callbacksEnabled = true;
     int callbackTimeoutMs = 10000;
@@ -111,6 +117,7 @@ public:
     HttpServer& getHttpServer() { return *httpServer_; }
     WebSocketServer& getWebSocketServer() { return *wsServer_; }
     ExecutionEngine& getEngine() { return *engine_; }
+    Scheduler& getScheduler() { return scheduler_; }
     RunnerBridge& getRunnerBridge() { return *runnerBridge_; }
     CallbackNotifier& getNotifier() { return *notifier_; }
     const AuthPolicy& getAuth() const { return auth_; }
@@ -139,6 +146,7 @@ private:
     TestHubConfig config_;
     spec::SpecRepository specs_;
     spec::SpecWatcher specWatcher_{specs_};
+    Scheduler scheduler_;
     std::unique_ptr<HttpServer> httpServer_;
     std::unique_ptr<WebSocketServer> wsServer_;
     std::unique_ptr<RunnerBridge> runnerBridge_;

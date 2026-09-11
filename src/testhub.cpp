@@ -47,6 +47,11 @@ void TestHubConfig::applyJson(const Json& json) {
         }
     }
 
+    const Json& scheduler = json["scheduler"];
+    if (scheduler["enabled"].isBool()) schedulerEnabled = scheduler["enabled"].asBool();
+    if (scheduler["interval_ms"].isNumber()) schedulerIntervalMs = scheduler["interval_ms"].asInt();
+    if (scheduler["dir"].isString()) schedulesDir = scheduler["dir"].asString();
+
     const Json& callbacks = json["callbacks"];
     if (callbacks["enabled"].isBool()) callbacksEnabled = callbacks["enabled"].asBool();
     if (callbacks["timeout_ms"].isNumber()) callbackTimeoutMs = callbacks["timeout_ms"].asInt();
@@ -99,6 +104,12 @@ Json TestHubConfig::toJson(bool maskSecrets) const {
     execution["results_dir"] = resultsDir;
     execution["environment"] = testhub::toJson(environment);
     j["execution"] = execution;
+
+    Json scheduler = Json::object();
+    scheduler["enabled"] = schedulerEnabled;
+    scheduler["interval_ms"] = schedulerIntervalMs;
+    scheduler["dir"] = schedulesDir;
+    j["scheduler"] = scheduler;
 
     Json callbacks = Json::object();
     callbacks["enabled"] = callbacksEnabled;
@@ -168,6 +179,18 @@ bool TestHub::initialize(const TestHubConfig& config) {
     engineConfig.resultsDir = config_.resultsDir;
     engineConfig.environment = config_.environment;
     engine_->configure(engineConfig);
+
+    SchedulerConfig schedConfig;
+    schedConfig.enabled = config_.schedulerEnabled;
+    schedConfig.intervalMs = config_.schedulerIntervalMs;
+    schedConfig.dir = config_.schedulesDir;
+    scheduler_.configure(schedConfig);
+    scheduler_.setSubmit([this](TestRequest req) { return engine_->submit(req); });
+    scheduler_.setIsActive([this](const std::string& id) {
+        auto rec = engine_->getRecord(id);
+        if (!rec) return false;
+        return rec->status.state == TestState::QUEUED || rec->status.state == TestState::RUNNING;
+    });
 
     notifier_ = std::make_unique<CallbackNotifier>(*engine_);
     CallbackConfig callbackConfig;
@@ -249,6 +272,7 @@ bool TestHub::start() {
     notifier_->start();
     engine_->start();
     specWatcher_.start();
+    scheduler_.start();
     startedAt_ = TimeUtil::now();
     running_ = true;
 
@@ -274,6 +298,7 @@ void TestHub::stop() {
     EventBus::getInstance().waitForIdle(1000);
 
     specWatcher_.stop();
+    scheduler_.stop();
     if (engine_) engine_->stop();
     if (notifier_) notifier_->stop();
     if (wsServer_) wsServer_->stop();
@@ -308,6 +333,19 @@ Json TestHub::statusJson() const {
         watch["reloads"] = static_cast<double>(w.reloads);
         watch["last_change_at"] = w.lastChangeAt;
         j["spec_watcher"] = watch;
+    }
+    {
+        SchedulerStats sch = scheduler_.stats();
+        Json sj = Json::object();
+        sj["enabled"] = sch.enabled;
+        sj["interval_ms"] = sch.intervalMs;
+        sj["count"] = static_cast<int>(sch.count);
+        sj["enabled_count"] = static_cast<int>(sch.enabledCount);
+        sj["ticks"] = static_cast<double>(sch.ticks);
+        sj["fires"] = static_cast<double>(sch.fires);
+        sj["skips"] = static_cast<double>(sch.skips);
+        sj["errors"] = static_cast<double>(sch.errors);
+        j["scheduler"] = sj;
     }
     if (runnerBridge_) j["runner"] = toJson(runnerBridge_->getStatus());
     if (engine_) {

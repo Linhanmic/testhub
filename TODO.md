@@ -5,8 +5,8 @@
 ## 当前状态（v1.1.0）
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
-- 116 个自动化测试全部通过（78 单元 + 19 集成 + 7 Python 协议 + 12 Node.js 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
 - 约 15k 行（含前端、Python / Node.js Runner、测试）
+- 125 个自动化测试全部通过（86 单元 + 20 集成 + 7 Python 协议 + 12 Node.js 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
 
 ## 路线图
 
@@ -21,7 +21,7 @@
 - [x] Python 参考 Runner（装饰器、钩子、DataTable、Messages、SkipStep、data_store）+ 示例步骤实现
 - [x] Node.js 参考 Runner（同一 JSON-lines 协议、async 步骤、零 npm 依赖）+ 示例步骤实现；同一套 .spec 可互换执行
 - [x] 异步事件总线 + WebSocket 推送（订阅过滤、历史回放）
-- [x] 内嵌 Web UI（总览、提交、测试记录、结果树、实时执行树、规范浏览/编辑/校验、Runner、事件流）
+- [x] 内嵌 Web UI（总览、提交、测试记录、测试计划、结果树、实时执行树、规范浏览/编辑/校验、Runner、事件流）
 - [x] 测试体系（自带迷你框架、单元 + 集成 + 协议测试、ctest、CI）
 - [x] 文档同步（README / DESIGN / QUICKSTART / TODO）
 - [x] 结果持久化：终态记录 JSON 落盘（`data/results/`），启动回放历史与统计，随 history_limit 裁剪
@@ -34,7 +34,7 @@
 
 ### P2 — 增强
 
-- [ ] 测试计划 / 定时任务（cron 表达式，周期性提交）
+- [x] 测试计划 / 定时任务（cron 表达式，周期性提交）
 - [ ] 结果对比与趋势（同一规范历次通过率、耗时曲线）
 - [x] 步骤级重试策略（`retry: n` 标签或请求参数）
 - [x] UI：结果树搜索/只看失败、事件流暂停与导出、键盘快捷键
@@ -200,6 +200,15 @@
 - 键盘：`?` 快捷键说明（原生 `<dialog>`）、`/` 聚焦搜索、`f` 只看失败、`g` 后接 `d/r/t/s/n/e` 跳转页面；SPA 更新 `document.title` 并在换页后聚焦 `<main>`；对话框打开或输入框聚焦时不拦截（`Escape` 除外）
 - 无新增 C++ 测试；行为由浏览器实测覆盖（只看失败 1/3、搜索 `another` 1/3、暂停期间 24 条不入 DOM、导出 51 条 JSON 含新测试、`g` `e` 进入事件流）
 
+### 迭代 20 — 测试计划 / UTC cron 调度
+
+- 五字段 UTC cron（`src/util/cron.h`）：`*` `,` `-` `/`、月份/星期名称、`@hourly` 等别名；DOM+DOW 均非 `*` 时按 Vixie 二者满足其一。`nextAfter` 跳过当前分钟
+- `Scheduler`：JSON 落盘到 `data/schedules/`（tmp+rename）；后台轮询 `tick(now)` 可注入时间；同一分钟只触发一次（持久化 `last_fired_minute`）；仅当 cron 文本变化时才重置该标记，避免 PUT 只改 `enabled` 导致同一分钟再发
+- `skip_if_running` 默认 true：上一 `last_test_id` 仍 queued/running 则跳过并发 `schedule.skipped`。提交 `submitted_by=schedule:<id>`，`metadata.schedule_id`
+- API：`GET/POST /schedules`、`GET/PUT/DELETE /schedules/{id}`、`POST /schedules/{id}/run`（202 / 409）。CLI `--schedules-dir` / `--no-scheduler`；`GET /status` 含调度器统计
+- UI：导航「测试计划」、列表（启用开关 / 立即运行 / 编辑 / 删除 / 搜索）、创建表单（cron 模板、规范多选、高级选项）；总览服务卡链接；事件 `schedule.*` 着色；快捷键 `g` `c`
+- 测试：cron 解析 4 + 调度器 4（含 enable-only 不重置）单元；集成 CRUD / 非法 cron / 立即运行 / 停用。合计 125（86+20+7+12）
+
 ---
 
 ## 决策记录
@@ -224,6 +233,7 @@
 | 迭代 17 | 自举步骤不轮询子测试；Runner「应在线」接受 connected/busy；状态接口不向忙进程发 get_steps | 步骤里 `wait` 子测试会在 `-j 1` 时占满唯一 worker 造成死锁；自举过程中当前槽位必然是 busy；JSON-lines 同步协议下 get_steps 与 execute_step 不能重叠 |
 | 迭代 18 | 只重试 FAILED，不重试 TEST_ERROR / 取消 / 超时；请求与标签取 max，上限 5 | 缺实现、崩溃、超时再跑一遍通常无意义；断言抖动才适合有限次重试。标签可按场景覆盖全局请求，避免误伤稳定用例 |
 | 迭代 19 | 过滤用 `hidden="until-found"` 而非从 DOM 删除；快捷键在输入框与对话框内不拦截 | 页内查找仍能发现被「只看失败」藏起的通过步骤；避免在表单或快捷键说明里误触 `g`/`f`/`/` |
+| 迭代 20 | cron 用 UTC；轮询 `tick` 而非系统 crontab；同一分钟只触发一次；`skip_if_running` 默认 true | 与 ISO 时间戳一致、测试可注入 now、零依赖；重启不双发；避免计划堆积 |
 
 ---
 
@@ -232,7 +242,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 116 个，全部通过（78 单元 + 19 集成 + 7 Python 协议 + 12 Node 协议）；`ctest` 约 7 s；TSan 零告警 |
+| 自动化测试 | 125 个，全部通过（86 单元 + 20 集成 + 7 Python 协议 + 12 Node 协议）；`ctest` 约 7 s；TSan 零告警 |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
 | 代码规模 | 约 14k 行（C++ 约 10.2k，前端约 1.2k，Python 约 0.7k，测试约 2.4k） |

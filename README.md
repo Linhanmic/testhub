@@ -12,16 +12,16 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 |------|------|
 | 运行模式 | 守护进程常驻；`--daemon`、PID 文件、JSON 配置文件、CLI 覆盖 |
 | 规范 | `# 规范` / `## 场景` / `* 步骤`、`tags:`、规范级数据表（数据驱动）、上下文步骤、`___` 清理步骤、概念（`.cpt`）展开、`"静态"` / `<动态>` / `<file:>` / `<table:>` 参数、内联表格；目录监控：编辑器/git 改动自动生效并推送 `specs.reloaded` |
-| 执行引擎 | 优先级队列、标签过滤表达式（`smoke & !slow`）、场景名过滤、fail_fast、测试/步骤超时、取消、`failed_only` 重跑、结果历史；**步骤重试**（请求 `step_retry` 或标签 `retry:N`，仅对 FAILED）；**并行流**（`parallel_streams`）把单个测试的场景拆到多个 Runner 进程 |
-| 持久化 | 已完成的测试以 JSON 落盘（默认 `data/results/`），重启后自动回放历史与统计 |
+| 执行引擎 | 优先级队列、标签过滤表达式（`smoke & !slow`）、场景名过滤、fail_fast、测试/步骤超时、取消、`failed_only` 重跑、结果历史；**步骤重试**（请求 `step_retry` 或标签 `retry:N`，仅对 FAILED）；**并行流**（`parallel_streams`）把单个测试的场景拆到多个 Runner 进程；**测试计划**（UTC cron 周期性提交，`skip_if_running` 避免堆积） |
+| 持久化 | 已完成的测试以 JSON 落盘（默认 `data/results/`），重启后自动回放历史与统计；测试计划落在 `data/schedules/` |
 | 报表 | 按需导出 JUnit XML（供 Jenkins / GitLab / GitHub Actions 收集）与自包含 HTML 报告；UI 一键下载 |
 | 回调 | 请求携带 `callback_url`，测试结束后 POST JSON 摘要（含失败场景清单与报表链接），失败按指数退避重试 |
 | 鉴权 | 可选 Bearer Token：默认保护写操作，可扩展到读操作与 WebSocket；UI 内置 token 输入 |
 | Runner | 跨平台子进程桥接 + JSON-lines 协议；内置 mock Runner；**Python** 与 **Node.js** 两个参考 Runner（步骤注册、钩子、数据表、消息；Node 支持 async 步骤），同一套 .spec 可互换执行；**Runner 池**：默认每个并发测试独占一个进程，`parallel_streams` 可让一个测试占用多个进程；进程逐个自愈、按需重启 |
 | 服务端 | 多线程 HTTP/1.1（keep-alive、流水线、Content-Length、超时、`{param}` 路由、CORS、HEAD/OPTIONS、ETag 静态资源、SPA 回退） |
 | 实时性 | 异步事件总线；`/ws/v1/events` WebSocket 推送（按类型/测试 ID 订阅、历史回放） |
-| Web UI | 内嵌单页应用：总览、提交测试、测试记录、结果树（搜索 / 只看失败）、运行中实时执行树、规范浏览/编辑/校验、Runner 状态、事件流（暂停 / 导出）、键盘快捷键、暗色模式 |
-| 质量 | 78 个单元测试 + 19 个 HTTP/WS 集成测试 + 7 个 Python 协议测试 + 12 个 Node.js 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
+| Web UI | 内嵌单页应用：总览、提交测试、测试记录、**测试计划（cron）**、结果树（搜索 / 只看失败）、运行中实时执行树、规范浏览/编辑/校验、Runner 状态、事件流（暂停 / 导出）、键盘快捷键、暗色模式 |
+| 质量 | 86 个单元测试 + 20 个 HTTP/WS 集成测试 + 7 个 Python 协议测试 + 12 个 Node.js 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
 
 ## 快速开始
 
@@ -138,7 +138,7 @@ Runner 启动时会加载 `--dir` 下 `step_impl/` 中的全部 `.py` / `.js` �
 | 方法 | 路径 | 描述 |
 |------|------|------|
 | GET | `/api/v1/health` | 健康检查 |
-| GET | `/api/v1/status` | 服务器统计（队列、运行中、通过/失败计数、本机 `url`） |
+| GET | `/api/v1/status` | 服务器统计（队列、运行中、通过/失败计数、本机 `url`、调度器） |
 | GET | `/api/v1/config` | 当前生效配置 |
 | POST | `/api/v1/tests`（别名 `/tests/run`） | 提交测试，返回 202 与 `test_id` |
 | GET | `/api/v1/tests?state=&limit=&offset=` | 列出测试 |
@@ -151,6 +151,10 @@ Runner 启动时会加载 `--dir` 下 `step_impl/` 中的全部 `.py` / `.js` �
 | DELETE | `/api/v1/tests/{id}` | 取消或删除记录 |
 | POST | `/api/v1/tests/{id}/rerun` | 重跑（`{"failed_only": true}` 仅重跑失败场景） |
 | GET | `/api/v1/queue` | 当前队列 |
+| GET | `/api/v1/schedules` | 列出测试计划（含 `next_run_at`、调度器是否启用） |
+| POST | `/api/v1/schedules` | 创建计划（`cron` 必填，五字段 UTC 或 `@hourly` 等） |
+| GET / PUT / DELETE | `/api/v1/schedules/{id}` | 读取 / 更新 / 删除计划 |
+| POST | `/api/v1/schedules/{id}/run` | 忽略 cron 立即提交一次（202；上一轮仍在跑且 `skip_if_running` 时 409） |
 | GET | `/api/v1/specs` | 列出规范（含场景数、标签、无效文件） |
 | POST | `/api/v1/specs/validate` | 校验文件或内联内容 |
 | POST | `/api/v1/specs/reload` | 立即重新扫描规范目录（返回 `changes`；目录监控开启时通常无需手动调用） |
@@ -182,6 +186,8 @@ WebSocket 连接后发送 `{"action":"subscribe","events":["test.*","scenario.*"
     --timeout <ms>         测试默认超时
     --results-dir <path>   结果持久化目录（默认 data/results）
     --no-persist           不持久化结果，仅保存在内存
+    --schedules-dir <path> 测试计划目录（默认 data/schedules）
+    --no-scheduler         不启动 cron 调度器（仍可 CRUD / 立即运行）
     --public-url <url>     回调载荷中链接的公开地址前缀
     --no-callbacks         禁用 callback_url 完成回调
     --auth-token <token>   启用 Bearer Token 鉴权（或环境变量 TESTHUB_AUTH_TOKEN）
@@ -206,6 +212,7 @@ WebSocket 连接后发送 `{"action":"subscribe","events":["test.*","scenario.*"
 │      ▼                    ▼                                   │ publish       │
 │  Web UI (SPA)      ExecutionEngine ── TestQueue(优先级) ── worker 线程 ×N       │
 │                           │  SpecRepository / SpecParser / ConceptDictionary   │
+│                           │  Scheduler（UTC cron 轮询，data/schedules/*.json） │
 │                           ▼                                                   │
 │                     RunnerBridge (Runner 池：槽位 ×N、会话/并行流、逐槽自愈)       │
 │                    ┌──────┴───────┐                                           │
@@ -226,12 +233,12 @@ src/
   main.cpp              CLI / 守护进程入口
   testhub.{h,cpp}       TestHub 门面：配置、组件装配、生命周期
   server/               http_server, websocket_server, api_routes, web_ui, web_assets
-  engine/               execution_engine, test_queue, tag_filter
+  engine/               execution_engine, test_queue, tag_filter, scheduler
   runner/               runner 接口, mock_runner, process_runner, runner_bridge
   spec/                 spec 数据模型, spec_parser, spec_repository
   event/                event_bus
   model/                types, json_convert
-  util/                 json, sha1, base64, logger, string/file/time 工具
+  util/                 json, sha1, base64, logger, string/file/time 工具, cron
 web/                    Web UI 源码（index.html, app.js, app.css, favicon.svg）
 runners/python/         Python 参考 Runner、示例步骤实现、协议自测
 runners/node/           Node.js 参考 Runner（同一协议，async 步骤）、示例步骤实现、协议自测

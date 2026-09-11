@@ -216,6 +216,7 @@ std::string makeTempDir(const char* prefix) {
 struct Server {
     std::string specsDir;
     std::string resultsDir;
+    std::string schedulesDir;
     bool ownsResultsDir = true;
     TestHub hub;
     int port = 0;
@@ -230,12 +231,14 @@ struct Server {
         fs::copy_file(std::string(TESTHUB_SOURCE_DIR) + "/specs/concepts/auth.cpt", specsDir + "/concepts/auth.cpt");
         if (existingResultsDir.empty()) resultsDir = makeTempDir("testhub-results-");
         else { resultsDir = existingResultsDir; ownsResultsDir = false; }
+        schedulesDir = makeTempDir("testhub-sched-");
 
         TestHubConfig cfg;
         cfg.host = "127.0.0.1";
         cfg.port = 0;
         cfg.specsDir = specsDir;
         cfg.resultsDir = resultsDir;
+        cfg.schedulesDir = schedulesDir;
         cfg.runnerLanguage = "mock";
         cfg.logLevel = "warn";
         cfg.logRequests = false;
@@ -252,6 +255,7 @@ struct Server {
         std::error_code ec;
         fs::remove_all(specsDir, ec);
         if (ownsResultsDir) fs::remove_all(resultsDir, ec);
+        fs::remove_all(schedulesDir, ec);
     }
 
     Json waitForTerminal(const std::string& id, int timeoutMs = 10000) {
@@ -1112,4 +1116,45 @@ TEST_CASE("integration: selfcheck spec verifies the running server through its o
         cfg.maxConcurrentTests = 1;  // 提交子测试但不在步骤里等待，避免占满 worker
     });
     expectSelfcheckPassed(s);
+}
+
+TEST_CASE("integration: schedules CRUD, fire-now, invalid cron") {
+    Server s;
+    CHECK_EQ(request(s.port, "GET", "/api/v1/status").json()["scheduler"]["count"].asInt(), 0);
+
+    HttpResult bad = request(s.port, "POST", "/api/v1/schedules",
+                             R"({"name":"bad","cron":"60 * * * *","spec_files":["login.spec"]})");
+    CHECK_EQ(bad.status, 400);
+
+    HttpResult created = request(s.port, "POST", "/api/v1/schedules",
+                                 R"({"name":"hourly-login","cron":"@hourly","spec_files":["login.spec"],"tags":["smoke"]})");
+    REQUIRE_EQ(created.status, 201);
+    Json plan = created.json();
+    std::string id = plan["id"].asString();
+    REQUIRE(!id.empty());
+    CHECK_EQ(plan["cron"].asString(), std::string("@hourly"));
+    CHECK(plan["enabled"].asBool());
+    CHECK(!plan["next_run_at"].asString("").empty());
+
+    Json listed = request(s.port, "GET", "/api/v1/schedules").json();
+    CHECK_EQ(listed["count"].asInt(), 1);
+    CHECK_EQ(request(s.port, "GET", "/api/v1/schedules/" + id).json()["name"].asString(), std::string("hourly-login"));
+
+    HttpResult run = request(s.port, "POST", "/api/v1/schedules/" + id + "/run");
+    REQUIRE_EQ(run.status, 202);
+    std::string testId = run.json()["test_id"].asString();
+    REQUIRE(!testId.empty());
+    Json st = s.waitForTerminal(testId);
+    REQUIRE(!st.isNull());
+    CHECK_EQ(st["state"].asString(), std::string("passed"));
+    CHECK_EQ(request(s.port, "GET", "/api/v1/tests/" + testId).json()["request"]["submitted_by"].asString(),
+             std::string("schedule:") + id);
+
+    HttpResult disable = request(s.port, "PUT", "/api/v1/schedules/" + id, R"({"enabled":false})");
+    CHECK_EQ(disable.status, 200);
+    CHECK(!disable.json()["enabled"].asBool());
+
+    CHECK_EQ(request(s.port, "DELETE", "/api/v1/schedules/" + id).status, 200);
+    CHECK_EQ(request(s.port, "GET", "/api/v1/schedules/" + id).status, 404);
+    CHECK_EQ(request(s.port, "GET", "/api/v1/schedules").json()["count"].asInt(), 0);
 }

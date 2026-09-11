@@ -41,6 +41,7 @@ TestHub 复用 Gauge 的规范语法（`.spec` / `.cpt`），便于迁移已有�
                  │    ├─ worker 线程 ×N ── executeTest/Spec/Scenario/Step ─────────┤
                  │    ├─ SpecRepository ── SpecParser / ConceptDictionary          │
                  │    │     └─ SpecWatcher (轮询目录，变更 → specs.reloaded) ────────┤
+                 │    ├─ Scheduler (UTC cron 轮询，data/schedules/*.json) ───────────┤
                  │    ├─ records_ (状态 + 结果历史，环形上限)                        │
                  │    └─ ResultStore (data/results/<id>.json，启动时回放)             │
                  │  CallbackNotifier ◄──subscribe(test.completed)── EventBus        │
@@ -67,6 +68,7 @@ TestHub 复用 Gauge 的规范语法（`.spec` / `.cpt`），便于迁移已有�
 | Runner 启动线程 | 临时，池大小 −1 | 池启动/重启时并行拉起其余 Runner 进程，随后 join |
 | 回调投递线程 | 1（CallbackNotifier） | 按到期时间取任务 POST `callback_url`，失败指数退避重试 |
 | 规范监控线程 | 1（SpecWatcher，可禁用） | 每 `specs.watch_interval_ms` 扫描一次目录快照，变更时重载概念并发布 `specs.reloaded` |
+| 调度线程 | 1（Scheduler，可禁用） | 每 `scheduler.interval_ms` 扫描到期的 UTC cron 计划并提交测试 |
 
 ## 3. 核心模块
 
@@ -161,6 +163,14 @@ worker 线程
 - API 的 PUT/DELETE 写完文件后调用 `acknowledge()` 重记快照，避免同一变更被报告两次；`POST /specs/reload` 则主动 `scan()` 并把变更集放进响应。
 - `GET /status` 的 `spec_watcher` 暴露 `enabled / interval_ms / tracked_files / scans / changes / reloads / last_change_at`；配置 `specs.watch`、`specs.watch_interval_ms`，CLI `--watch-interval` / `--no-watch`。
 
+### 3.4b Scheduler（`src/engine/scheduler.*`，`src/util/cron.h`）
+
+- 五字段 cron（分 时 日 月 星期）按 **UTC** 求值；支持 `*` `,` `-` `/`、`JAN`–`DEC` / `SUN`–`SAT`，以及 `@hourly` `@daily` `@weekly` `@monthly` `@yearly`。日与星期都不是 `*` 时按 Vixie：二者满足其一即可。
+- 后台线程按 `scheduler.interval_ms`（默认 1 s）调用 `tick(now)`；同一 UTC 分钟只触发一次，`last_fired_minute` 随 JSON 落盘，重启不会双发。仅改 `enabled` 等字段不会重置该标记。
+- 计划文件：`<schedules_dir>/<id>.json`（临时文件 + rename）。提交时 `submitted_by = "schedule:<id>"`，`metadata.schedule_id`。`skip_if_running`（默认 true）在上一 `last_test_id` 仍 queued/running 时跳过并发布 `schedule.skipped`。
+- 选择轮询而非系统 crontab：零依赖、可注入 now、与 SpecWatcher 同一模式。`--no-scheduler` 仍加载计划，可 CRUD / `POST .../run`，但不启线程。
+- `GET /status` 的 `scheduler` 暴露 `enabled / interval_ms / count / enabled_count / ticks / fires / skips / errors`。
+
 ### 3.5 RunnerBridge / Runner（`src/runner/`）
 
 ```cpp
@@ -213,9 +223,10 @@ class Runner {                      // 抽象接口
 
 | 路由 | 功能 |
 |------|------|
-| `#/dashboard` | 统计卡片、通过率环图、最近测试、实时事件摘要 |
+| `#/dashboard` | 统计卡片、通过率环图、最近测试、实时事件摘要、调度器摘要 |
 | `#/run` | 提交表单（规范多选、标签表达式、场景过滤、优先级、环境、超时、fail_fast、步骤重试、并行流），实时 curl 预览 |
 | `#/tests` / `#/tests/{id}` | 列表（状态筛选、取消/重跑/删除）；详情页：状态卡、**运行中由事件流构建的实时执行树**、完成后的结果树（上下文/步骤/清理、概念展开、数据行参数替换、消息与堆栈、**搜索 / 只看失败**）、请求信息、事件面板（暂停 / 导出 JSON） |
+| `#/schedules` | 测试计划列表（启用开关、立即运行、删除、搜索）；创建/编辑表单（UTC cron、规范、标签、`skip_if_running`）；`g` `c` 跳转 |
 | `#/specs` / `#/specs/{file}` | 规范列表（校验全部、重新加载、新建）；详情：结构视图（标出 Runner 未实现的步骤）、源码、编辑器（校验/保存/删除） |
 | `#/runner` | Runner 状态、已实现步骤、重启 |
 | `#/events` | 全量事件流，按类型/测试 ID 过滤，可隐藏 step.*，可暂停与导出 JSON |
@@ -272,6 +283,8 @@ JSON 序列化位于 `src/model/json_convert.h`，字段名为 snake_case（`spe
 | `queue.updated` | `queue_size`, `action`（enqueued/dequeued/cancelled） |
 | `specs.reloaded` | `source`（manual / api / watcher）；api：`file`, `action`（created/updated/deleted）；watcher：`created`, `updated`, `deleted` 计数、`files`、`concepts`、`concepts_reloaded` |
 | `callback.delivered` / `callback.failed` | `url`, `status`, `attempts`, `error` |
+| `schedule.created` / `updated` / `deleted` | `schedule_id`, `name`, `cron`, `enabled` |
+| `schedule.triggered` / `skipped` / `error` | `schedule_id`, `name`, `cron`, `reason`, `error` |
 
 `data` 的值全部为字符串，前端按需解析。
 
@@ -357,6 +370,7 @@ JSON 文件（`--config`），键与 `--print-config` 输出一致：
                 "results_dir":"data/results","environment":{"BASE_URL":"http://localhost:3000"}},
   "callbacks": {"enabled":true,"timeout_ms":10000,"max_attempts":3,"retry_backoff_ms":1000,"public_base_url":""},
   "specs":     {"dir":"specs","concepts_dir":"","watch":true,"watch_interval_ms":2000},
+  "scheduler": {"enabled":true,"interval_ms":1000,"dir":"data/schedules"},
   "logging":   {"level":"info","file":"","requests":true}
 }
 ```
@@ -370,14 +384,14 @@ src/
   main.cpp                 CLI、配置合并、daemonize、信号
   testhub.{h,cpp}          TestHubConfig + TestHub 门面
   server/                  http_server, websocket_server, api_routes, auth.h, web_ui, web_assets.h
-  engine/                  execution_engine, result_store, test_queue, tag_filter
+  engine/                  execution_engine, result_store, test_queue, tag_filter, scheduler
   notify/                  callback_notifier（callback_url 投递与重试）
   report/                  report_writer（JUnit XML / HTML）
   runner/                  runner, mock_runner, process_runner, runner_bridge
   spec/                    spec, spec_parser, spec_repository, spec_watcher（目录轮询监控）
   event/                   event_bus
   model/                   types, json_convert
-  util/                    json, http_client, sha1, base64, logger, string_util, file_util, time_util
+  util/                    json, http_client, sha1, base64, logger, string_util, file_util, time_util, cron.h
 web/                       index.html, app.js, app.css, favicon.svg
 runners/python/            testhub_runner.py, step_impl/, test_runner_protocol.py
 runners/node/              testhub_runner.js, step_impl/, test_runner_protocol.js
@@ -389,8 +403,8 @@ cmake/EmbedResources.cmake
 
 ## 8. 质量保障
 
-- **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405、请求过滤器；鉴权策略（读/写、凭据来源、常量时间比较）；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话、**parallel_streams 场景重叠且结果保序**、**step_retry / retry:N 仅重试 FAILED**）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）；报表（JUnit 结构与计数、转义、空结果、HTML 自包含）；规范目录监控；Runner 池（注入假 Runner：并行分配与会话绑定、阻塞等待、逐槽重启与预算、健康槽位优先、并发安全收缩、停止/重启生命周期、**reserveSlots 原子预约**）。
-- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）、Bearer Token（写保护与全保护两种模式、WebSocket 查询参数）、WebSocket 秒连秒断压力回归、目录监控端到端、**真实 Python Runner 池**（两个进程并行执行两个 0.8 s 的测试总耗时 < 1.5 s；`kill -9` 其中一个进程后按需自愈且孤儿进程组被清理；手动重启替换全部进程；无 `python3` 时跳过）、**真实 Node.js Runner**（同一套 login/calculator/checkout 规范全部通过；断言失败带回 `AssertionError` 堆栈；未实现步骤报 error；无 `node` 时跳过）、**parallel_streams**（单个测试的两个 0.8 s 场景拆到两个 Python 进程，总耗时 < 1.5 s，结果顺序与规范一致）、**步骤重试**（mock flaky 步骤 `step_retry=1` 后通过且 `attempts=2`；越界 400）、**自举**（`selfcheck.spec` 经 Python / Node 调用本进程 HTTP API，并断言入队的 `calculator.spec` 子测试随后通过）。
+- **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405、请求过滤器；鉴权策略（读/写、凭据来源、常量时间比较）；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话、**parallel_streams 场景重叠且结果保序**、**step_retry / retry:N 仅重试 FAILED**）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）；报表（JUnit 结构与计数、转义、空结果、HTML 自包含）；规范目录监控；Runner 池（注入假 Runner：并行分配与会话绑定、阻塞等待、逐槽重启与预算、健康槽位优先、并发安全收缩、停止/重启生命周期、**reserveSlots 原子预约**）；**cron 解析与调度器**（别名、Vixie DOM/DOW、同一分钟去重、skip_if_running、仅改 enabled 不重置 lastFiredMinute、持久化回放）。
+- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）、Bearer Token（写保护与全保护两种模式、WebSocket 查询参数）、WebSocket 秒连秒断压力回归、目录监控端到端、**真实 Python Runner 池**（两个进程并行执行两个 0.8 s 的测试总耗时 < 1.5 s；`kill -9` 其中一个进程后按需自愈且孤儿进程组被清理；手动重启替换全部进程；无 `python3` 时跳过）、**真实 Node.js Runner**（同一套 login/calculator/checkout 规范全部通过；断言失败带回 `AssertionError` 堆栈；未实现步骤报 error；无 `node` 时跳过）、**parallel_streams**（单个测试的两个 0.8 s 场景拆到两个 Python 进程，总耗时 < 1.5 s，结果顺序与规范一致）、**步骤重试**（mock flaky 步骤 `step_retry=1` 后通过且 `attempts=2`；越界 400）、**自举**（`selfcheck.spec` 经 Python / Node 调用本进程 HTTP API，并断言入队的 `calculator.spec` 子测试随后通过）、**测试计划**（CRUD、非法 cron 400、立即运行 202 且 `submitted_by=schedule:<id>`、停用）。
 - **并发正确性**：所有线程句柄的赋值与检查共享同一把锁（WebSocket 读线程见 `Connection::readerMutex`）；停止流程在持锁状态下改标志再 `notify`，避免丢失唤醒；终态记录先落盘再对外可见。排查偶发问题时用 ThreadSanitizer 构建（`-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"`）运行集成测试，当前零告警。
 - **协议测试**：`python_runner_protocol`（子进程启动 Python Runner，验证 ping/get_steps/execute_step/hook/kill 与错误路径）；`node_runner_protocol`（同样覆盖 async 步骤等待、`console.log` 不污染协议通道、缺失实现目录、非法 JSON 不杀死进程）。
 - **CI**：Ubuntu（g++、clang++）与 macOS，`-Wall -Wextra -Wpedantic -Werror`，`ctest`，二进制冒烟（curl），独立运行 Python / Node 协议测试；CI 安装 Python 3.x 与 Node.js 22。

@@ -54,6 +54,8 @@ void printUsage(const char* program) {
         << "      --timeout <ms>         测试默认超时（毫秒）\n"
         << "      --results-dir <path>   结果持久化目录（默认 data/results）\n"
         << "      --no-persist           不持久化结果，仅保存在内存\n"
+        << "      --schedules-dir <path> 测试计划目录（默认 data/schedules）\n"
+        << "      --no-scheduler         不启动 cron 调度器\n"
         << "      --public-url <url>     回调载荷中链接的公开地址前缀（如 http://ci.example.com:8080）\n"
         << "      --no-callbacks         禁用 callback_url 完成回调\n"
         << "      --auth-token <token>   启用 Bearer Token 鉴权（也可用环境变量 TESTHUB_AUTH_TOKEN）\n"
@@ -79,7 +81,7 @@ bool needsValue(const std::string& opt) {
     static const char* withValue[] = {
         "-p", "--port", "-H", "--host", "-l", "--language", "-r", "--runner-cmd", "-d", "--dir", "--runner-pool",
         "-s", "--specs", "--concepts", "--watch-interval", "-c", "--config", "-j", "--concurrency", "--timeout",
-        "--results-dir", "--public-url", "--auth-token", "--log-level", "--log-file", "--web-dir", "--pid-file"};
+        "--results-dir", "--schedules-dir", "--public-url", "--auth-token", "--log-level", "--log-file", "--web-dir", "--pid-file"};
     for (const char* w : withValue) {
         if (opt == w) return true;
     }
@@ -179,6 +181,10 @@ int main(int argc, char* argv[]) {
             config.resultsDir = value;
         } else if (opt == "--no-persist") {
             config.resultsDir.clear();
+        } else if (opt == "--schedules-dir") {
+            config.schedulesDir = value;
+        } else if (opt == "--no-scheduler") {
+            config.schedulerEnabled = false;
         } else if (opt == "--public-url") {
             config.publicBaseUrl = value;
         } else if (opt == "--no-callbacks") {

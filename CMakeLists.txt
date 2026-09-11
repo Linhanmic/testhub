@@ -64,6 +64,7 @@ set(TESTHUB_CORE_SOURCES
     src/testhub.cpp
     src/engine/execution_engine.cpp
     src/engine/result_store.cpp
+    src/engine/scheduler.cpp
     src/event/event_bus.cpp
     src/notify/callback_notifier.cpp
     src/report/report_writer.cpp

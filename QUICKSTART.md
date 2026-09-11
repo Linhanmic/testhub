@@ -78,6 +78,7 @@ src/server/auth.h          AuthPolicy — Bearer Token 校验（HttpServer 请�
 src/server/web_ui.cpp      TestHub::registerWebUi() — 内嵌资源或 --web-dir，SPA 回退
 src/server/websocket_*     RFC 6455 握手/帧编解码，订阅过滤，EventBus 转发
 src/engine/execution_engine.*  提交 → 队列 → worker → 规范/场景/步骤执行 → 结果与事件
+src/engine/scheduler.*     UTC cron 测试计划（轮询 tick、JSON 落盘）
 src/engine/result_store.*  结果 JSON 落盘与启动回放
 src/report/report_writer.* JUnit XML / HTML 报表渲染
 src/notify/callback_notifier.* callback_url 完成回调（队列、重试、事件）
@@ -90,6 +91,7 @@ src/runner/runner_bridge.*  Runner 池：槽位分配、测试级会话（thread
 src/spec/spec_parser.*     .spec/.cpt 解析器，ConceptDictionary
 src/spec/spec_repository.* 规范目录扫描、读取、写入、校验
 src/spec/spec_watcher.*    规范目录轮询监控（自动重载概念、推送 specs.reloaded）
+src/util/cron.h            五字段 UTC cron 解析（别名、Vixie DOM/DOW）
 src/event/event_bus.*      单例异步事件总线，历史环形缓冲，通配订阅
 src/model/types.h          TestRequest/TestStatus/TestResult/StepResult/Event 等
 src/model/json_convert.h   模型 ↔ Json
@@ -148,6 +150,19 @@ http.get("/api/v1/hello/{name}", [this](const HttpRequest& req) {
 ### 添加规范示例
 
 把 `.spec` 放入 `specs/`，概念放入 `specs/concepts/`。服务默认每 2 秒轮询规范目录，用编辑器或 `git pull` 改动的文件会自动生效（概念自动重载，UI 规范页实时刷新并提示）；也可以调用 `POST /api/v1/specs/reload` 或在 UI 点击"重新加载"立即扫描。`--watch-interval <ms>` 调整频率，`--no-watch` 关闭。
+
+### 添加定时计划
+
+在 UI「测试计划」页填写 UTC cron（或 `@hourly`）并勾选规范，或：
+
+```bash
+curl -X POST http://localhost:8080/api/v1/schedules \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"hourly-smoke","cron":"@hourly","spec_files":["login.spec"],"tags":["smoke"]}'
+curl -X POST http://localhost:8080/api/v1/schedules/<id>/run   # 立即跑一次，不等整点
+```
+
+计划保存在 `data/schedules/`。`--no-scheduler` 关闭自动触发但仍可 CRUD / 立即运行。`skip_if_running` 默认开启，避免上一轮未结束时堆积。
 
 ## 6. 调试技巧
 
