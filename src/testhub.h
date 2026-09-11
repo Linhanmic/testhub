@@ -124,6 +124,11 @@ public:
     int boundPort() const { return httpServer_ ? httpServer_->port() : 0; }
 
     /**
+     * Runner / 回调使用的本机 API 根 URL（public_base_url，否则 http://127.0.0.1:<boundPort>）
+     */
+    std::string runtimeBaseUrl() const;
+
+    /**
      * 服务器状态摘要（供 /api/v1/status 与 Dashboard 使用）
      */
     Json statusJson() const;

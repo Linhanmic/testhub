@@ -167,7 +167,29 @@ TEST_CASE("spec: repository lists and resolves example specs") {
 
     auto summaries = repo.list();
     REQUIRE(summaries.size() >= 3);
-    for (const auto& s : summaries) CHECK_MSG(s.valid, s.file);
+    bool foundSelfcheck = false;
+    for (const auto& s : summaries) {
+        CHECK_MSG(s.valid, s.file);
+        if (s.file == "selfcheck.spec") foundSelfcheck = true;
+    }
+    CHECK(foundSelfcheck);
+
+    std::string selfcheck;
+    REQUIRE(repo.readRaw("selfcheck.spec", selfcheck));
+    ParseResult parsed = SpecParser().parse(selfcheck, "selfcheck.spec");
+    REQUIRE(parsed.ok());
+    REQUIRE(parsed.specification);
+    CHECK_EQ(parsed.specification->scenarios.size(), static_cast<size_t>(3));
+    bool foundGet = false;
+    for (const auto& st : parsed.specification->scenarios[0].steps) {
+        if (st.parameterizedText != "GET {} 的 {} 应为 {}") continue;
+        foundGet = true;
+        REQUIRE_EQ(st.args.size(), static_cast<size_t>(3));
+        CHECK_EQ(st.args[0].value, std::string("/api/v1/health"));
+        CHECK_EQ(st.args[1].value, std::string("status"));
+        CHECK_EQ(st.args[2].value, std::string("ok"));
+    }
+    CHECK(foundGet);
 
     std::vector<std::string> missing;
     auto resolved = repo.resolve({"login.spec", "specs/calculator.spec", "nope.spec"}, &missing);

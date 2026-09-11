@@ -266,6 +266,39 @@ struct Server {
     }
 };
 
+void copySelfcheckSpec(const Server& s) {
+    fs::copy_file(std::string(TESTHUB_SOURCE_DIR) + "/specs/selfcheck.spec",
+                  fs::path(s.specsDir) / "selfcheck.spec",
+                  fs::copy_options::overwrite_existing);
+}
+
+void expectSelfcheckPassed(Server& s, int timeoutMs = 45000) {
+    copySelfcheckSpec(s);
+    HttpResult submit = request(s.port, "POST", "/api/v1/tests",
+                                R"({"spec_files":["selfcheck.spec"],"name":"selfcheck"})");
+    REQUIRE_EQ(submit.status, 202);
+    std::string id = submit.json()["test_id"].asString();
+    Json st = s.waitForTerminal(id, timeoutMs);
+    REQUIRE(!st.isNull());
+    if (st["state"].asString() != "passed") {
+        std::cout << "selfcheck result:\n"
+                  << request(s.port, "GET", "/api/v1/tests/" + id + "/result").body << "\n";
+    }
+    REQUIRE_EQ(st["state"].asString(), std::string("passed"));
+    CHECK_EQ(st["total_scenarios"].asInt(), 3);
+    CHECK_EQ(st["passed_scenarios"].asInt(), 3);
+
+    Json list = request(s.port, "GET", "/api/v1/tests?limit=50").json();
+    std::string childId;
+    for (const auto& t : list["tests"].asArray()) {
+        if (t["name"].asString() == "selfcheck-child") childId = t["test_id"].asString();
+    }
+    REQUIRE(!childId.empty());
+    Json child = s.waitForTerminal(childId, timeoutMs);
+    REQUIRE(!child.isNull());
+    CHECK_EQ(child["state"].asString(), std::string("passed"));
+}
+
 } // namespace
 
 TEST_CASE("integration: health, status and web ui are served") {
@@ -279,6 +312,7 @@ TEST_CASE("integration: health, status and web ui are served") {
     CHECK_EQ(status.status, 200);
     CHECK_EQ(status.json()["version"].asString(), std::string(TestHub::version()));
     CHECK_EQ(status.json()["runner"]["state"].asString(), std::string("connected"));
+    CHECK(status.json()["url"].asString().find(std::to_string(s.port)) != std::string::npos);
     CHECK_EQ(status.headers["content-type"], std::string("application/json; charset=utf-8"));
     CHECK_EQ(status.headers["access-control-allow-origin"], std::string("*"));
 
@@ -997,6 +1031,8 @@ TEST_CASE("integration: node runner executes the bundled specs end to end") {
     CHECK(restart.json()["restarted"].asBool());
     CHECK(restart.json()["pid"].asInt() != oldPid);
     CHECK_EQ(restart.json()["step_count"].asInt(), runner["step_count"].asInt());
+
+    expectSelfcheckPassed(s);
 }
 
 TEST_CASE("integration: parallel_streams split one test across runner processes") {
@@ -1034,4 +1070,19 @@ TEST_CASE("integration: parallel_streams split one test across runner processes"
     CHECK_EQ(runner["pool_size"].asInt(), 2);
     CHECK(runner["runners"][0]["steps_executed"].asNumber() > 0);
     CHECK(runner["runners"][1]["steps_executed"].asNumber() > 0);
+}
+
+TEST_CASE("integration: selfcheck spec verifies the running server through its own HTTP API") {
+    if (std::system("python3 -c 'import sys' >/dev/null 2>&1") != 0) {
+        std::cout << "    (python3 not available; skipping)\n";
+        return;
+    }
+    std::string runnerDir = std::string(TESTHUB_SOURCE_DIR) + "/runners/python";
+    Server s("", [&](TestHubConfig& cfg) {
+        cfg.runnerLanguage = "python";
+        cfg.runnerCommand = "python3 " + runnerDir + "/testhub_runner.py";
+        cfg.projectPath = runnerDir;
+        cfg.maxConcurrentTests = 1;  // 提交子测试但不在步骤里等待，避免占满 worker
+    });
+    expectSelfcheckPassed(s);
 }

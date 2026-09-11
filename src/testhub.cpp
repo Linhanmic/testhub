@@ -199,12 +199,37 @@ bool TestHub::initialize(const TestHubConfig& config) {
     return true;
 }
 
+std::string TestHub::runtimeBaseUrl() const {
+    if (!config_.publicBaseUrl.empty()) {
+        std::string url = config_.publicBaseUrl;
+        while (!url.empty() && (url.back() == '/' || url.back() == '\\')) url.pop_back();
+        return url;
+    }
+    int port = boundPort();
+    if (port <= 0) return "";
+    return "http://127.0.0.1:" + std::to_string(port);
+}
+
 bool TestHub::start() {
     if (!initialized_) {
         TH_LOG_ERROR("testhub", "TestHub not initialized");
         return false;
     }
     if (running_) return true;
+
+    // 先绑定端口，再启动 Runner：子进程和步骤上下文都能读到 TESTHUB_URL，从而用 .spec 测本进程
+    if (!httpServer_->start()) {
+        TH_LOG_ERROR("testhub", "Failed to start HTTP server: " + httpServer_->lastError());
+        return false;
+    }
+    std::string selfUrl = runtimeBaseUrl();
+    if (!selfUrl.empty()) config_.environment["TESTHUB_URL"] = selfUrl;
+    if (!config_.authToken.empty()) config_.environment["TESTHUB_TOKEN"] = config_.authToken;
+    {
+        EngineConfig engineConfig = engine_->config();
+        engineConfig.environment = config_.environment;
+        engine_->configure(engineConfig);
+    }
 
     RunnerConfig runnerConfig;
     runnerConfig.language = config_.runnerLanguage;
@@ -221,10 +246,6 @@ bool TestHub::start() {
         TH_LOG_WARN("testhub", "Runner failed to start; tests will error until the runner is available");
     }
 
-    if (!httpServer_->start()) {
-        TH_LOG_ERROR("testhub", "Failed to start HTTP server: " + httpServer_->lastError());
-        return false;
-    }
     notifier_->start();
     engine_->start();
     specWatcher_.start();
@@ -241,7 +262,8 @@ bool TestHub::start() {
     } else {
         TH_LOG_WARN("testhub", "Auth: disabled (set server.auth_token / --auth-token / TESTHUB_AUTH_TOKEN to protect the API)");
     }
-    publishEvent(EventType::SERVER_STARTED, "", {{"version", version()}, {"port", std::to_string(boundPort())}});
+    publishEvent(EventType::SERVER_STARTED, "", {{"version", version()}, {"port", std::to_string(boundPort())},
+                                                 {"url", runtimeBaseUrl()}});
     return true;
 }
 
@@ -270,6 +292,7 @@ Json TestHub::statusJson() const {
     j["version"] = version();
     j["running"] = running_.load();
     j["port"] = boundPort();
+    j["url"] = runtimeBaseUrl();
     j["started_at"] = TimeUtil::toIso8601(startedAt_);
     j["uptime_seconds"] = running_ ? std::chrono::duration<double>(TimeUtil::now() - startedAt_).count() : 0.0;
     j["specs_dir"] = specs_.specsDir();

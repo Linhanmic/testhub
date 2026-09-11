@@ -26,7 +26,7 @@ target_link_libraries(testhub_integration_tests PRIVATE testhub_core)
 target_compile_definitions(testhub_integration_tests PRIVATE
     TESTHUB_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME integration_tests COMMAND testhub_integration_tests)
-set_tests_properties(integration_tests PROPERTIES TIMEOUT 120)
+set_tests_properties(integration_tests PROPERTIES TIMEOUT 180)
 
 find_program(PYTHON3_EXECUTABLE NAMES python3 python)
 if(PYTHON3_EXECUTABLE)
