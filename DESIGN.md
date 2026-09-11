@@ -386,7 +386,8 @@ JSON 文件（`--config`），键与 `--print-config` 输出一致：
 
 ```
 src/
-  main.cpp                 CLI、配置合并、daemonize、信号
+  main.cpp                 CLI、配置合并、daemonize / Windows 服务、信号
+  win_service.{h,cpp}      Windows SCM 安装/卸载/ServiceMain（仅 WIN32 链入 testhub.exe）
   testhub.{h,cpp}          TestHubConfig + TestHub 门面
   server/                  http_server, websocket_server, api_routes, auth.h, web_ui, web_assets.h
   engine/                  execution_engine, result_store, test_queue, tag_filter, scheduler, trends.h
@@ -402,6 +403,8 @@ runners/python/            testhub_runner.py, step_impl/, test_runner_protocol.p
 runners/node/              testhub_runner.js, step_impl/, test_runner_protocol.js
 specs/                     示例规范与 concepts/
 tests/                     test_framework.h, test_main.cpp, test_*.cpp, test_integration.cpp
+packaging/                 docker 默认配置、Windows 打包/服务脚本、systemd 单元
+Dockerfile / compose.yaml
 cmake/EmbedResources.cmake
 .github/workflows/ci.yml
 ```
@@ -412,7 +415,7 @@ cmake/EmbedResources.cmake
 - **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）、Bearer Token（写保护与全保护两种模式、WebSocket 查询参数）、WebSocket 秒连秒断压力回归、目录监控端到端、**真实 Python Runner 池**（两个进程并行执行两个 0.8 s 的测试总耗时 < 1.5 s；`kill -9` 其中一个进程后按需自愈且孤儿进程组被清理；手动重启替换全部进程；无 `python3` 时跳过）、**真实 Node.js Runner**（同一套 login/calculator/checkout 规范全部通过；断言失败带回 `AssertionError` 堆栈；未实现步骤报 error；无 `node` 时跳过）、**parallel_streams**（单个测试的两个 0.8 s 场景拆到两个 Python 进程，总耗时 < 1.5 s，结果顺序与规范一致）、**步骤重试**（mock flaky 步骤 `step_retry=1` 后通过且 `attempts=2`；越界 400）、**自举**（`selfcheck.spec` 经 Python / Node 调用本进程 HTTP API，并断言入队的 `calculator.spec` 子测试随后通过）、**测试计划**（CRUD、非法 cron 400、立即运行 202 且 `submitted_by=schedule:<id>`、停用）、**趋势与对比**（两次 `login.spec` 后 `GET /trends` 与 `GET /tests/{id}/compare` 自动基线）、**多规范项目**（`GET /projects`、切换后 `/specs` 根目录变化、运行中 409）。
 - **并发正确性**：所有线程句柄的赋值与检查共享同一把锁（WebSocket 读线程见 `Connection::readerMutex`）；停止流程在持锁状态下改标志再 `notify`，避免丢失唤醒；终态记录先落盘再对外可见。排查偶发问题时用 ThreadSanitizer 构建（`-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"`）运行集成测试，当前零告警。
 - **协议测试**：`python_runner_protocol`（子进程启动 Python Runner，验证 ping/get_steps/execute_step/hook/kill 与错误路径）；`node_runner_protocol`（同样覆盖 async 步骤等待、`console.log` 不污染协议通道、缺失实现目录、非法 JSON 不杀死进程）。
-- **CI**：Ubuntu（g++、clang++）与 macOS，`-Wall -Wextra -Wpedantic -Werror`，`ctest`，二进制冒烟（curl），独立运行 Python / Node 协议测试；CI 安装 Python 3.x 与 Node.js 22。
+- **CI**：Ubuntu（g++、clang++）、macOS、Windows MSVC，`-Werror`，`ctest`（Windows 跳过 POSIX 集成测试），二进制冒烟，独立 Python / Node 协议测试；另有 Docker 镜像构建并以 `login.spec` 冒烟。Linux 上 `--service install` 必须退出码 2。
 
 ## 9. 已知限制与演进方向
 

@@ -94,6 +94,10 @@ endif()
 # ------------------------------------------------------------
 add_executable(testhub src/main.cpp)
 target_link_libraries(testhub PRIVATE testhub_core)
+if(WIN32)
+    target_sources(testhub PRIVATE src/win_service.cpp)
+    target_link_libraries(testhub PRIVATE advapi32)
+endif()
 
 install(TARGETS testhub RUNTIME DESTINATION bin)
 install(DIRECTORY specs/ DESTINATION share/testhub/specs)

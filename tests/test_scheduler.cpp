@@ -4,9 +4,9 @@
 #include "util/file_util.h"
 #include "util/time_util.h"
 
+#include "compat.h"
 #include <chrono>
 #include <filesystem>
-#include <unistd.h>
 
 using namespace testhub;
 namespace fs = std::filesystem;
@@ -23,7 +23,7 @@ bool matches(const std::string& expr, const char* iso) {
 }
 
 std::string tempDir() {
-    auto p = fs::temp_directory_path() / ("testhub-sched-" + std::to_string(::getpid()) + "-" +
+    auto p = fs::temp_directory_path() / ("testhub-sched-" + std::to_string(testhubGetPid()) + "-" +
                                           std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     fs::create_directories(p);
     return p.string();

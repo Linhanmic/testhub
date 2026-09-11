@@ -61,9 +61,62 @@ jobs:
           curl -sf "http://127.0.0.1:18099/api/v1/tests?state=passed" | grep -q '"count":1'
           kill $PID
           wait $PID || true
+          ./build/testhub --help | grep -q -- "--service"
+          set +e
+          ./build/testhub --service install
+          test $? -eq 2
 
       - name: Python runner protocol (standalone)
         run: python3 runners/python/test_runner_protocol.py
 
       - name: Node runner protocol (standalone)
         run: node runners/node/test_runner_protocol.js
+
+  windows:
+    name: windows / msvc
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTESTHUB_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 180
+      - name: Smoke
+        shell: pwsh
+        run: |
+          $exe = if (Test-Path build/Release/testhub.exe) { "build/Release/testhub.exe" } else { "build/testhub.exe" }
+          & $exe --version
+          & $exe --help | Select-String "service" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "help failed" }
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t testhub:ci .
+      - name: Run and probe health
+        run: |
+          docker run -d --name testhub-ci -p 18099:8080 testhub:ci
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:18099/api/v1/health > /dev/null; then break; fi
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:18099/api/v1/health | grep -q '"status":"ok"'
+          curl -sf -X POST http://127.0.0.1:18099/api/v1/tests \
+            -H 'Content-Type: application/json' \
+            -d '{"spec_files":["login.spec"]}'
+          sleep 2
+          curl -sf "http://127.0.0.1:18099/api/v1/tests?state=passed" | grep -q '"count":1'
+          docker stop testhub-ci
+          docker rm testhub-ci
+

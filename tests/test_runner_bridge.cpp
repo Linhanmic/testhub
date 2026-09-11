@@ -418,3 +418,12 @@ TEST_CASE("runner pool: reserveSlots takes N distinct slots atomically") {
     CHECK(acquired.load());
     CHECK_EQ(f.bridge.getStatus().busyCount, 0);
 }
+
+TEST_CASE("runner: defaultCommandForLanguage python uses platform launcher") {
+    std::string cmd = RunnerBridge::defaultCommandForLanguage("python");
+#ifdef _WIN32
+    CHECK(cmd.find("python") == 0);
+#else
+    CHECK(cmd.find("python3") == 0);
+#endif
+}

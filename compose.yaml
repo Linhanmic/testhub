@@ -1,0 +1,11 @@
+services:
+  testhub:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - testhub-data:/var/lib/testhub
+    restart: unless-stopped
+
+volumes:
+  testhub-data:

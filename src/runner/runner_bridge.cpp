@@ -15,6 +15,11 @@
 
 #ifndef _WIN32
 #include <unistd.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 namespace testhub {
@@ -27,7 +32,10 @@ thread_local int tlsSlot = -1;
 
 std::string executableDir() {
 #ifdef _WIN32
-    return "";
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return "";
+    return std::filesystem::path(std::string(buf, n)).parent_path().string();
 #else
     char buf[4096];
     ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
@@ -38,6 +46,16 @@ std::string executableDir() {
 }
 
 std::string quoteShell(const std::string& s) {
+#ifdef _WIN32
+    if (s.find_first_of(" \t\"") == std::string::npos) return s;
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"') out += "\\\"";
+        else out.push_back(c);
+    }
+    out.push_back('"');
+    return out;
+#else
     if (s.find_first_of(" \t\"'$`\\") == std::string::npos) return s;
     std::string out = "'";
     for (char c : s) {
@@ -46,6 +64,15 @@ std::string quoteShell(const std::string& s) {
     }
     out += "'";
     return out;
+#endif
+}
+
+std::string pythonLauncher() {
+#ifdef _WIN32
+    return "python";
+#else
+    return "python3";
+#endif
 }
 
 /**
@@ -54,7 +81,10 @@ std::string quoteShell(const std::string& s) {
 std::string locateBundledRunner(const std::string& relative) {
     std::vector<std::string> roots;
     if (const char* home = std::getenv("TESTHUB_HOME")) {
-        if (*home) roots.push_back(home);
+        if (*home) {
+            roots.push_back(home);
+            roots.push_back((std::filesystem::path(home) / "share" / "testhub").string());
+        }
     }
     std::string exeDir = executableDir();
     if (!exeDir.empty()) {
@@ -135,8 +165,8 @@ std::string RunnerBridge::defaultCommandForLanguage(const std::string& language)
     }
     if (language == "python" || language == "py") {
         std::string script = locateBundledRunner("runners/python/testhub_runner.py");
-        if (!script.empty()) return "python3 " + quoteShell(script);
-        return "python3 -m testhub_runner";
+        if (!script.empty()) return pythonLauncher() + " " + quoteShell(script);
+        return pythonLauncher() + " -m testhub_runner";
     }
     if (language == "node" || language == "js" || language == "javascript" || language == "nodejs") {
         std::string script = locateBundledRunner("runners/node/testhub_runner.js");

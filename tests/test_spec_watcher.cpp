@@ -4,10 +4,10 @@
 #include "spec/spec_watcher.h"
 #include "util/file_util.h"
 
+#include "compat.h"
 #include <chrono>
 #include <filesystem>
 #include <thread>
-#include <unistd.h>
 
 using namespace testhub;
 using namespace testhub::spec;
@@ -19,7 +19,7 @@ struct WatchedDir {
     std::string dir;
     SpecRepository repo;
     WatchedDir() {
-        dir = (fs::temp_directory_path() / ("testhub-watch-" + std::to_string(::getpid()) + "-" +
+        dir = (fs::temp_directory_path() / ("testhub-watch-" + std::to_string(testhubGetPid()) + "-" +
                                             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))).string();
         fs::create_directories(dir + "/concepts");
         write("a.spec", "# A\n## S\n* step a\n");

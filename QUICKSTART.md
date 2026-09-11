@@ -181,6 +181,14 @@ curl -X POST http://localhost:8080/api/v1/schedules/<id>/run   # 立即跑一次
 
 计划保存在 `data/schedules/`。`--no-scheduler` 关闭自动触发但仍可 CRUD / 立即运行。`skip_if_running` 默认开启，避免上一轮未结束时堆积。
 
+### 容器与 Windows 服务
+
+```bash
+docker build -t testhub . && docker run --rm -p 8080:8080 testhub
+```
+
+Windows：`packaging/windows/package.ps1` 暂存 `testhub.exe` + specs/runners，管理员执行 `install-service.ps1` 调用 `testhub.exe --service install`（SCM 自动启动，工作目录为 exe 所在目录）。Linux 也可拷贝 `packaging/linux/testhub.service`。
+
 ## 6. 调试技巧
 
 - `--log-level debug` 会打印每个 HTTP 请求、Runner 收发的每条 JSON 消息与事件派发；

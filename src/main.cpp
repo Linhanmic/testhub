@@ -21,6 +21,9 @@
 
 #ifndef _WIN32
 #include <unistd.h>
+#else
+#include "win_service.h"
+#include <filesystem>
 #endif
 
 namespace {
@@ -68,6 +71,8 @@ void printUsage(const char* program) {
 #ifndef _WIN32
         << "      --daemon               以守护进程方式运行（POSIX）\n"
 #endif
+        << "      --service <cmd>        Windows 服务：install | uninstall | run（仅 Windows）\n"
+        << "      --service-name <name>  服务名（默认 TestHub）\n"
         << "      --print-config         打印最终生效配置并退出\n"
         << "  -v, --version              显示版本\n"
         << "  -h, --help                 显示帮助\n\n"
@@ -81,7 +86,8 @@ bool needsValue(const std::string& opt) {
     static const char* withValue[] = {
         "-p", "--port", "-H", "--host", "-l", "--language", "-r", "--runner-cmd", "-d", "--dir", "--runner-pool",
         "-s", "--specs", "--concepts", "--watch-interval", "-c", "--config", "-j", "--concurrency", "--timeout",
-        "--results-dir", "--schedules-dir", "--public-url", "--auth-token", "--log-level", "--log-file", "--web-dir", "--pid-file"};
+        "--results-dir", "--schedules-dir", "--public-url", "--auth-token", "--log-level", "--log-file", "--web-dir", "--pid-file",
+        "--service", "--service-name"};
     for (const char* w : withValue) {
         if (opt == w) return true;
     }
@@ -110,6 +116,8 @@ int main(int argc, char* argv[]) {
     std::string conceptsOverride;
     bool daemonize = false;
     bool printConfig = false;
+    std::string serviceCmd;
+    std::string serviceName = "TestHub";
 
     // 第一遍：先找配置文件，使命令行选项能覆盖配置文件
     for (int i = 1; i < argc; ++i) {
@@ -207,6 +215,10 @@ int main(int argc, char* argv[]) {
             pidFile = value;
         } else if (opt == "--daemon") {
             daemonize = true;
+        } else if (opt == "--service") {
+            serviceCmd = value;
+        } else if (opt == "--service-name") {
+            serviceName = value;
         } else if (opt == "--print-config") {
             printConfig = true;
         } else {
@@ -240,6 +252,50 @@ int main(int argc, char* argv[]) {
         std::cout << config.toJson().dump(2) << "\n";
         return 0;
     }
+
+#ifndef _WIN32
+    if (!serviceCmd.empty()) {
+        std::cerr << "错误: --service 仅在 Windows 上可用（install | uninstall | run）\n";
+        return 2;
+    }
+#else
+    if (serviceCmd == "install") {
+        std::string image = winQuoteArg(winExecutablePath());
+        for (int i = 1; i < argc; ++i) {
+            std::string a = argv[i];
+            if (a == "--service") {
+                image += " --service run";
+                if (i + 1 < argc && argv[i + 1][0] != '-') ++i;
+                continue;
+            }
+            if (a == "--service-name") {
+                if (i + 1 < argc) ++i;
+                continue;
+            }
+            image += " " + winQuoteArg(argv[i]);
+        }
+        std::string err;
+        if (!winServiceInstall(serviceName, "TestHub", image, &err)) {
+            std::cerr << "错误: 安装服务失败: " << err << "\n";
+            return 1;
+        }
+        std::cout << "已安装 Windows 服务 \"" << serviceName << "\"\n  " << image << "\n";
+        return 0;
+    }
+    if (serviceCmd == "uninstall") {
+        std::string err;
+        if (!winServiceUninstall(serviceName, &err)) {
+            std::cerr << "错误: 卸载服务失败: " << err << "\n";
+            return 1;
+        }
+        std::cout << "已删除 Windows 服务 \"" << serviceName << "\"\n";
+        return 0;
+    }
+    if (!serviceCmd.empty() && serviceCmd != "run") {
+        std::cerr << "错误: --service 应为 install、uninstall 或 run，得到 '" << serviceCmd << "'\n";
+        return 2;
+    }
+#endif
 
 #ifndef _WIN32
     if (daemonize) {
@@ -282,16 +338,49 @@ int main(int argc, char* argv[]) {
 #endif
 
     testhub::TestHub hub;
-    if (!hub.initialize(config)) {
-        std::cerr << "错误: TestHub 初始化失败\n";
-        return 1;
-    }
-    if (!hub.start()) {
-        std::cerr << "错误: TestHub 启动失败（端口 " << config.port << " 是否已被占用？）\n";
-        return 1;
-    }
+    auto startHub = [&]() -> bool {
+        if (!hub.initialize(config)) {
+            std::cerr << "错误: TestHub 初始化失败\n";
+            return false;
+        }
+        if (!hub.start()) {
+            std::cerr << "错误: TestHub 启动失败（端口 " << config.port << " 是否已被占用？）\n";
+            return false;
+        }
+        return true;
+    };
+    auto waitHub = [&]() {
+        std::unique_lock<std::mutex> lock(g_shutdownMutex);
+        while (!g_shutdownRequested.load()) {
+            g_shutdownCv.wait_for(lock, std::chrono::milliseconds(200));
+        }
+    };
+    auto stopHub = [&]() {
+        std::cout << "\n正在停止 TestHub...\n";
+        hub.stop();
+        if (!pidFile.empty()) testhub::FileUtil::deleteFile(pidFile);
+    };
 
-    if (!daemonize) {
+#ifdef _WIN32
+    auto requestStop = [&]() {
+        g_shutdownRequested = true;
+        g_shutdownCv.notify_all();
+    };
+    if (serviceCmd == "run") {
+        if (config.logFile.empty()) {
+            std::error_code ec;
+            auto logDir = std::filesystem::path(winExecutablePath()).parent_path() / "data";
+            std::filesystem::create_directories(logDir, ec);
+            config.logFile = (logDir / "testhub.log").string();
+        }
+        testhub::Logger::getInstance().setConsole(false);
+        if (winServiceDispatch(serviceName, startHub, waitHub, stopHub, requestStop)) return 0;
+    }
+#endif
+
+    if (!startHub()) return 1;
+
+    if (!daemonize && serviceCmd != "run") {
         std::cout << "\n  TestHub " << testhub::TestHub::version() << " 已启动\n"
                   << "  Web UI : http://" << (config.host == "0.0.0.0" ? "localhost" : config.host) << ":" << hub.boundPort() << "/\n"
                   << "  API    : http://" << (config.host == "0.0.0.0" ? "localhost" : config.host) << ":" << hub.boundPort() << "/api/v1/\n"
@@ -301,16 +390,7 @@ int main(int argc, char* argv[]) {
                   << "  按 Ctrl+C 停止\n\n";
     }
 
-    {
-        std::unique_lock<std::mutex> lock(g_shutdownMutex);
-        // 信号处理函数不能安全地持锁，因此用带超时的等待避免丢失唤醒
-        while (!g_shutdownRequested.load()) {
-            g_shutdownCv.wait_for(lock, std::chrono::milliseconds(200));
-        }
-    }
-
-    std::cout << "\n正在停止 TestHub...\n";
-    hub.stop();
-    if (!pidFile.empty()) testhub::FileUtil::deleteFile(pidFile);
+    waitHub();
+    stopHub();
     return 0;
 }

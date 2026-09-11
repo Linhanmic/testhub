@@ -21,7 +21,7 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 | 服务端 | 多线程 HTTP/1.1（keep-alive、流水线、Content-Length、超时、`{param}` 路由、CORS、HEAD/OPTIONS、ETag 静态资源、SPA 回退） |
 | 实时性 | 异步事件总线；`/ws/v1/events` WebSocket 推送（按类型/测试 ID 订阅、历史回放） |
 | Web UI | 内嵌单页应用：总览、提交测试、测试记录、**结果趋势**、**测试计划（cron）**、结果树（搜索 / 只看失败）、运行中实时执行树、规范浏览/编辑（语法高亮与步骤补全）、**多规范项目切换**、Runner 状态、事件流（暂停 / 导出）、键盘快捷键、暗色模式 |
-| 质量 | 95 个单元测试 + 22 个 HTTP/WS 集成测试 + 7 个 Python 协议测试 + 12 个 Node.js 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
+| 质量 | 96 个单元测试 + 22 个 HTTP/WS 集成测试 + 7 个 Python 协议测试 + 12 个 Node.js 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS、Windows MSVC、Docker 镜像冒烟），`-Werror`；ThreadSanitizer 零告警 |
 
 ## 快速开始
 
@@ -86,6 +86,30 @@ curl -X POST http://localhost:8080/api/v1/tests \
 ```
 
 `selfcheck.spec` 只断言子测试提交返回 202，不会在步骤里等待子测试结束（避免 `-j 1` 占满唯一 worker）。mock Runner 不会真正发 HTTP，自举需要 `--language python` 或 `--language node`。
+
+## 部署
+
+### Docker
+
+```bash
+docker build -t testhub .
+docker run --rm -p 8080:8080 testhub
+# 或 docker compose up --build
+```
+
+镜像以非 root 用户运行，Python Runner + 仓库示例规范，数据卷 `/var/lib/testhub`，`HEALTHCHECK` 探测 `/api/v1/health`。`TESTHUB_HOME=/opt/testhub`。
+
+### Windows 服务
+
+```powershell
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --parallel
+powershell -File packaging/windows/package.ps1
+# 管理员:
+powershell -File dist/testhub-windows/install-service.ps1
+```
+
+`testhub.exe --service install|uninstall|run` 直接对接服务控制管理器（自动启动）。卸载：`uninstall-service.ps1`。Linux 可用 `packaging/linux/testhub.service`。
 
 ## 编写规范与步骤实现
 
@@ -204,6 +228,8 @@ WebSocket 连接后发送 `{"action":"subscribe","events":["test.*","scenario.*"
     --web-dir <path>       从磁盘目录提供 Web UI（前端开发模式，免重新编译）
     --pid-file <file>      写入 PID 文件
     --daemon               守护进程模式（POSIX）
+    --service <cmd>        Windows 服务：install | uninstall | run（仅 Windows）
+    --service-name <name>  服务名（默认 TestHub）
     --print-config         打印最终生效配置并退出
 ```
 
@@ -250,7 +276,10 @@ runners/python/         Python 参考 Runner、示例步骤实现、协议自测
 runners/node/           Node.js 参考 Runner（同一协议，async 步骤）、示例步骤实现、协议自测
 specs/                  示例规范（login / calculator / checkout / streams / selfcheck / slow）与概念
 tests/                  单元测试与集成测试（自带迷你测试框架）
-.github/workflows/      CI
+packaging/              Docker 默认配置、Windows 打包/服务脚本、systemd 单元
+Dockerfile              多阶段镜像（非 root、HEALTHCHECK）
+compose.yaml            本地一键启动
+.github/workflows/      CI（Linux / macOS / Windows / Docker）
 ```
 
 ## 许可证

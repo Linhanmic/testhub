@@ -6,7 +6,7 @@
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
 - 约 15k 行（含前端、Python / Node.js Runner、测试）
-- 136 个自动化测试全部通过（95 单元 + 22 集成 + 7 Python 协议 + 12 Node.js 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
+- 137 个自动化测试全部通过（96 单元 + 22 集成 + 7 Python 协议 + 12 Node.js 协议），GitHub Actions（Linux / macOS / Windows / Docker）；ThreadSanitizer 零告警
 
 ## 路线图
 
@@ -40,7 +40,7 @@
 - [x] UI：结果树搜索/只看失败、事件流暂停与导出、键盘快捷键
 - [x] UI：规范编辑器语法高亮与步骤自动补全（基于 `/runner/steps`）
 - [x] 多规范目录 / 多项目切换
-- [ ] Windows 打包与服务安装脚本；Dockerfile
+- [x] Windows 打包与服务安装脚本；Dockerfile
 
 ### P3 — 工程质量
 
@@ -235,6 +235,14 @@
 - 示例：`examples/alt-specs/hello.spec`
 - 浏览器实测（Python Runner `:18086`）：侧栏「主规范 / 备用示例」；规范页 6 个文件；切到备用后只剩 `hello.spec`，副标题为 `examples/alt-specs · 项目 alt`；总览显示项目「备用示例」
 
+### 迭代 24 — Docker 镜像与 Windows 服务
+
+- 多阶段 `Dockerfile`：Release 构建、非 root、`TESTHUB_HOME=/opt/testhub`、Python Runner、`HEALTHCHECK`；`compose.yaml` 挂数据卷
+- Windows：`testhub.exe --service install|uninstall|run` 对接 SCM（自动启动、STOP/SHUTDOWN）；服务进程切到 exe 目录以免相对路径落到 System32。`packaging/windows/package.ps1` / `install-service.ps1`
+- Runner 在 Windows 上用 `GetModuleFileName` 定位捆绑脚本，Python 启动器为 `python`；`quoteShell` 用双引号
+- CI 增加 `windows-latest` 与 `docker build` + `login.spec` 冒烟；Linux 上 `--service install` 退出 2
+- 测试：`defaultCommandForLanguage` 启动器前缀 1 单元。合计 137（96+22+7+12）
+
 ---
 
 ## 决策记录
@@ -261,6 +269,7 @@
 | 迭代 19 | 过滤用 `hidden="until-found"` 而非从 DOM 删除；快捷键在输入框与对话框内不拦截 | 页内查找仍能发现被「只看失败」藏起的通过步骤；避免在表单或快捷键说明里误触 `g`/`f`/`/` |
 | 迭代 22 | 编辑器高亮用叠加层而非 contenteditable；补全同时收录 Runner 步骤与概念 | contenteditable 难与原生撤销/选区/读屏共存；mock 不报告步骤时概念仍能补全 |
 | 迭代 23 | 项目只切换规范/概念目录，Runner 保持全局 | 「多套用例、同一套步骤实现」是主场景；换 Runner 要重启进程池且不能与运行中的测试并存，留给以后按项目覆盖 runner 字段 |
+| 迭代 24 | Windows 服务进 testhub.exe 而不是依赖 NSSM；Docker 用多阶段非 root | 零第三方服务包装器；SCM 能真正 STOP。镜像不跑测试、不含源码，减小攻击面 |
 
 ---
 
@@ -269,7 +278,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 136 个，全部通过（95 单元 + 22 集成 + 7 Python 协议 + 12 Node 协议）；`ctest` 约 7 s；TSan 零告警 |
+| 自动化测试 | 137 个，全部通过（96 单元 + 22 集成 + 7 Python 协议 + 12 Node 协议）；`ctest` 约 7 s；TSan 零告警 |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
 | 代码规模 | 约 14k 行（C++ 约 10.2k，前端约 1.2k，Python 约 0.7k，测试约 2.4k） |

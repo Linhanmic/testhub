@@ -3,11 +3,11 @@
 #include "model/json_convert.h"
 #include "util/file_util.h"
 
+#include "compat.h"
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <thread>
-#include <unistd.h>
 
 using namespace testhub;
 namespace fs = std::filesystem;
@@ -17,7 +17,7 @@ namespace {
 struct TempSpecs {
     std::string dir;
     TempSpecs() {
-        dir = (fs::temp_directory_path() / ("testhub-engine-" + std::to_string(::getpid()) + "-" +
+        dir = (fs::temp_directory_path() / ("testhub-engine-" + std::to_string(testhubGetPid()) + "-" +
                                             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))).string();
         fs::create_directories(dir);
     }
