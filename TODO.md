@@ -5,7 +5,7 @@
 ## 当前状态（v1.1.0）
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
-- 109 个自动化测试全部通过（74 单元 + 16 集成 + 7 Python 协议 + 12 Node.js 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
+- 113 个自动化测试全部通过（77 单元 + 17 集成 + 7 Python 协议 + 12 Node.js 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
 - 约 15k 行（含前端、Python / Node.js Runner、测试）
 
 ## 路线图
@@ -30,10 +30,7 @@
 - [x] 鉴权：`server.auth_token` Bearer Token（写操作 / 可选全保护），UI token 输入与 401 处理
 - [x] 规范目录监控：轮询快照，外部变更自动重载概念并推送 `specs.reloaded`，UI 实时刷新
 - [x] Runner 池：每个并发测试独占一个 Runner 进程真正并行，逐槽自愈，UI 展示每个进程
-
-### P1 — 下一步（按优先级）
-
-- [ ] **测试内并行**：把单个测试的场景拆到池中多个进程（Gauge `--parallel` 流语义），需要按进程隔离 suite/spec 钩子
+- [x] 测试内并行：`parallel_streams` 把单个测试的场景拆到池中多个进程（每流独立 suite/spec 钩子）
 
 ### P2 — 增强
 
@@ -171,6 +168,14 @@
 - 测试：12 个协议用例（ping/get_steps/场景通过/断言失败/缺实现/表格/async 等待/dataStore 清空/未知类型/非法 JSON/缺失目录/kill 退出 0）+ 1 个集成测试（login+calculator+checkout 12 场景全部通过、失败场景带回 AssertionError 堆栈、手动重启换 PID）
 - 实测：`--language node --dir runners/node -j 3` 三个含 5 s async 等待的测试 5.02 / 5.03 / 5.02 s 同时完成，每进程各执行 75 步；UI Runner 页显示语言 `node`、版本 `node-1.0`、三进程池
 
+### 迭代 16 — 测试内并行流
+
+- 请求字段 `parallel_streams`（默认 1，上限 64）生效：引擎先解析规范再 `reserveSlots(N)` 原子预约 N 个 Runner 槽位，把场景（含数据驱动的每一行）轮询分到 N 条流
+- 每条流在自己的进程/线程上执行 `before_suite` → 所负规范的 `before_spec` / 场景 / `after_spec` → `after_suite`；结果按原始顺序回填。mock 等并发安全 Runner 不按池大小封顶（共享槽位上真正重叠）
+- 预约策略：等到同时有 N 个空闲才一次性占用，避免“先拿 1 再等其余”与其它测试互相死锁；空闲不足时测试保持 `queued`
+- UI：提交表单增加“并行流”，详情页展示；事件带 `stream`
+- 测试：2 个引擎单测（两个 400 ms 场景 403 ms 完成且顺序为甲/乙；streams=1 回归）+ `reserveSlots` 单测 + 1 个真实 Python 集成测试（单 worker、池大小 2、一个测试的两个 0.8 s 场景 903 ms 完成）
+
 ---
 
 ## 决策记录
@@ -191,6 +196,7 @@
 | 迭代 14 | Runner 池的分配粒度从"场景"改为"测试"（推翻迭代 5 的结论） | 迭代 5 只有一个进程，场景级是在"串行"里争取交错；有了多进程后，测试级让每个测试独占进程：suite/spec 钩子天然只在自己的进程上执行、无需广播、不同测试互不干扰；代价是 `pool_size < -j` 时多余 worker 空等，而默认池大小跟随 `-j` 消除了这一情形 |
 | 迭代 14 | 进程存活检查按需进行（分配时），不加心跳线程 | 每次分配/每步执行前都会 `waitpid(WNOHANG)`，成本可忽略；崩溃的进程在下次使用时重启，UI 报告"will be restarted on next use"；额外的心跳线程只会更早发现但不会更早需要它 |
 | 迭代 15 | Node.js Runner 用 CommonJS + 模块解析别名，不引入 npm 包 | 保持仓库零第三方依赖；`require('testhub-runner')` 解析到捆绑脚本即可；async/await 是 Node 自带能力，用来验证协议对异步步骤的等待语义 |
+| 迭代 16 | 并行流采用“凑齐 N 个槽位再开工”，不降级为更少的流 | 降级会让同一测试的 suite 钩子只跑在部分进程上，语义随池占用情况漂移；排队等齐更可预期。数据驱动的每一行当作独立场景分片 |
 
 ---
 
@@ -199,7 +205,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 109 个，全部通过（74 单元 + 16 集成 + 7 Python 协议 + 12 Node 协议）；`ctest` 约 5 s；TSan 零告警 |
+| 自动化测试 | 113 个，全部通过（77 单元 + 17 集成 + 7 Python 协议 + 12 Node 协议）；`ctest` 约 7 s；TSan 零告警 |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
 | 代码规模 | 约 14k 行（C++ 约 10.2k，前端约 1.2k，Python 约 0.7k，测试约 2.4k） |

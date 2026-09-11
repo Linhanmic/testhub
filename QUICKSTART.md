@@ -136,7 +136,7 @@ http.get("/api/v1/hello/{name}", [this](const HttpRequest& req) {
 
 完整协议见 [DESIGN.md §5.3](DESIGN.md#53-runner-通信协议)。参考实现：`runners/python/testhub_runner.py` 与 `runners/node/testhub_runner.js`（`require('testhub-runner')` 无需 npm 安装）。用 `--language python` / `--language node`，或 `--language custom --runner-cmd "node my_runner.js"` 接入。
 
-并发（`-j N`）时 TestHub 默认启动 N 个 Runner 进程组成池，每个测试独占一个进程，因此 Runner 只需处理串行请求、不必线程安全；进程可通过环境变量 `TESTHUB_RUNNER_INDEX` / `TESTHUB_RUNNER_POOL_SIZE` 区分自己（例如为每个进程分配独立的浏览器 profile 或端口）。`--runner-pool <n>` 可单独指定进程数。收到 `kill` 后请尽快退出，否则 1.5 s 后会被 SIGTERM/SIGKILL 终止整个进程组。
+并发（`-j N`）时 TestHub 默认启动 N 个 Runner 进程组成池，每个测试默认独占一个进程，因此 Runner 只需处理串行请求、不必线程安全；进程可通过环境变量 `TESTHUB_RUNNER_INDEX` / `TESTHUB_RUNNER_POOL_SIZE` 区分自己（例如为每个进程分配独立的浏览器 profile 或端口）。提交测试时把 `parallel_streams` 设为大于 1，会把**该测试**的场景拆到多个进程（每个进程仍是串行的，会各自跑一遍 suite/spec 钩子）。`--runner-pool <n>` 可单独指定进程数。收到 `kill` 后请尽快退出，否则 1.5 s 后会被 SIGTERM/SIGKILL 终止整个进程组。
 
 ### 添加规范示例
 
