@@ -14,6 +14,7 @@ add_executable(testhub_unit_tests
     test_http_client.cpp
     test_spec_watcher.cpp
     test_scheduler.cpp
+    test_trends.cpp
     test_runner_bridge.cpp)
 target_link_libraries(testhub_unit_tests PRIVATE testhub_core)
 target_compile_definitions(testhub_unit_tests PRIVATE

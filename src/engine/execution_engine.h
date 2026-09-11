@@ -8,6 +8,7 @@
 #include "result_store.h"
 #include "test_queue.h"
 #include "tag_filter.h"
+#include "trends.h"
 #include "../model/types.h"
 #include "../runner/runner_bridge.h"
 #include "../spec/spec_repository.h"
@@ -17,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -114,6 +116,15 @@ public:
     const ResultStore& store() const { return store_; }
     size_t queueSize() const { return queue_.size(); }
     int queuePosition(const std::string& testId) const { return queue_.position(testId); }
+
+    /** 终态记录按提交时间升序，供趋势聚合 */
+    std::vector<TrendRun> trendRuns() const;
+    /**
+     * 对比两次终态结果。baselineId 为空则自动选最近一次规范有交集的终态。
+     * 找不到时返回 nullopt 并填写 error。
+     */
+    std::optional<TestComparison> compareTests(const std::string& currentId, const std::string& baselineId,
+                                               std::string& error) const;
 
     TestQueue& queue() { return queue_; }
 

@@ -558,3 +558,45 @@ TEST_CASE("engine: step_retry retries FAILED but not TEST_ERROR") {
     CHECK_EQ(parsed.stepRetry, 1);
     CHECK_EQ(toJson(parsed)["step_retry"].asInt(), 1);
 }
+
+TEST_CASE("engine: trendRuns and compareTests auto-baseline") {
+    Harness h;
+    h.temp.write("trend.spec", "# 趋势\n\n## 甲\n* 步骤 A\n\n## 乙\n* 这一步 fail\n");
+    TestRequest req;
+    req.specFiles = {"trend.spec"};
+    req.name = "first";
+    std::string a = h.engine.submit(req);
+    CHECK(h.waitFor(a).state == TestState::FAILED);
+
+    h.temp.write("trend.spec", "# 趋势\n\n## 甲\n* 步骤 A\n\n## 乙\n* 步骤 B\n");
+    req.name = "second";
+    std::string b = h.engine.submit(req);
+    CHECK(h.waitFor(b).state == TestState::PASSED);
+
+    auto runs = h.engine.trendRuns();
+    REQUIRE_EQ(runs.size(), static_cast<size_t>(2));
+    CHECK_EQ(runs[0].testId, a);
+    CHECK_EQ(runs[1].testId, b);
+    REQUIRE(!runs[0].specFiles.empty());
+    CHECK_EQ(runs[0].specFiles[0], std::string("trend.spec"));
+
+    std::string err;
+    CHECK(!h.engine.compareTests(b, b, err));
+    CHECK(err.find("itself") != std::string::npos);
+    CHECK(!h.engine.compareTests("nope", "", err));
+    CHECK(err.find("not found") != std::string::npos);
+
+    auto cmp = h.engine.compareTests(b, "", err);
+    REQUIRE(cmp.has_value());
+    CHECK(cmp->autoBaseline);
+    CHECK_EQ(cmp->baselineId, a);
+    CHECK_EQ(cmp->currentId, b);
+    auto sum = summarizeDiffs(cmp->diffs);
+    CHECK_EQ(sum.improved, 1);
+    CHECK_EQ(sum.unchanged, 1);
+    CHECK_EQ(sum.regressed, 0);
+
+    auto explicitCmp = h.engine.compareTests(b, a, err);
+    REQUIRE(explicitCmp.has_value());
+    CHECK(!explicitCmp->autoBaseline);
+}

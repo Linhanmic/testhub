@@ -131,6 +131,7 @@ worker 线程
 - **历史**：`records_` 保留最近 `execution.history_limit` 条已完成记录；`DELETE /tests` 清空。
 - **持久化**：`ResultStore`（`src/engine/result_store.*`）在测试进入终态时把 `{request, status, result, resolved_specs}` 写入 `<results_dir>/<test_id>.json`（临时文件 + rename 原子替换）；`start()` 时回放目录中的记录到 `records_` 与统计，并按 `history_limit` 裁剪；删除/清空历史同步删除文件；损坏文件跳过并告警。`results_dir` 为空则仅保存在内存。
 - **零匹配**：没有任何场景被执行的测试状态为 `skipped` 并附带警告，而不是 `passed`。
+- **趋势与对比**：`trendRuns()` 按提交顺序收集终态记录（跳过 `cancelled`）。`GET /api/v1/trends?spec=&limit=` 用 `groupTrends` 按规范聚合通过率/耗时（`spec` 为空时第一条序列为 `(all)`）。`GET /api/v1/tests/{id}/compare?with=` 对比两次结果的场景（key = 规范文件 + 场景名 + 数据行号）；`with` 为空则自动选规范集合有交集的上一终态。分类：`regressed` / `improved` / `still_failed` / `unchanged` / `added` / `removed`。纯函数在 `src/engine/trends.h`。
 - **报表**：`ReportWriter`（`src/report/report_writer.*`）从 `TestRecord` 按需渲染 JUnit XML（规范 → `testsuite`，场景/数据行 → `testcase`，`failure`/`error`/`skipped`，步骤与 Runner 消息进 `system-out`，标签/环境/元数据进 `properties`）或自包含 HTML；不落盘，历史记录回放后同样可导出。
 - **进度**：`progress = (executed + skipped) / total`，`executed_scenarios` 只统计真正运行过的场景。
 
@@ -223,9 +224,10 @@ class Runner {                      // 抽象接口
 
 | 路由 | 功能 |
 |------|------|
-| `#/dashboard` | 统计卡片、通过率环图、最近测试、实时事件摘要、调度器摘要 |
+| `#/dashboard` | 统计卡片、通过率环图、最近测试、实时事件摘要、调度器摘要、通过率 sparkline |
 | `#/run` | 提交表单（规范多选、标签表达式、场景过滤、优先级、环境、超时、fail_fast、步骤重试、并行流），实时 curl 预览 |
-| `#/tests` / `#/tests/{id}` | 列表（状态筛选、取消/重跑/删除）；详情页：状态卡、**运行中由事件流构建的实时执行树**、完成后的结果树（上下文/步骤/清理、概念展开、数据行参数替换、消息与堆栈、**搜索 / 只看失败**）、请求信息、事件面板（暂停 / 导出 JSON） |
+| `#/tests` / `#/tests/{id}` | 列表（状态筛选、取消/重跑/删除）；详情页：状态卡、**与上次对比**（回归/改善表）、**运行中由事件流构建的实时执行树**、完成后的结果树（上下文/步骤/清理、概念展开、数据行参数替换、消息与堆栈、**搜索 / 只看失败**）、请求信息、事件面板（暂停 / 导出 JSON） |
+| `#/trends` | 按规范筛选的通过率/耗时 SVG sparkline 与历次点数表；`g` `a` 跳转 |
 | `#/schedules` | 测试计划列表（启用开关、立即运行、删除、搜索）；创建/编辑表单（UTC cron、规范、标签、`skip_if_running`）；`g` `c` 跳转 |
 | `#/specs` / `#/specs/{file}` | 规范列表（校验全部、重新加载、新建）；详情：结构视图（标出 Runner 未实现的步骤）、源码、编辑器（校验/保存/删除） |
 | `#/runner` | Runner 状态、已实现步骤、重启 |
@@ -384,7 +386,7 @@ src/
   main.cpp                 CLI、配置合并、daemonize、信号
   testhub.{h,cpp}          TestHubConfig + TestHub 门面
   server/                  http_server, websocket_server, api_routes, auth.h, web_ui, web_assets.h
-  engine/                  execution_engine, result_store, test_queue, tag_filter, scheduler
+  engine/                  execution_engine, result_store, test_queue, tag_filter, scheduler, trends.h
   notify/                  callback_notifier（callback_url 投递与重试）
   report/                  report_writer（JUnit XML / HTML）
   runner/                  runner, mock_runner, process_runner, runner_bridge
@@ -403,8 +405,8 @@ cmake/EmbedResources.cmake
 
 ## 8. 质量保障
 
-- **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405、请求过滤器；鉴权策略（读/写、凭据来源、常量时间比较）；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话、**parallel_streams 场景重叠且结果保序**、**step_retry / retry:N 仅重试 FAILED**）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）；报表（JUnit 结构与计数、转义、空结果、HTML 自包含）；规范目录监控；Runner 池（注入假 Runner：并行分配与会话绑定、阻塞等待、逐槽重启与预算、健康槽位优先、并发安全收缩、停止/重启生命周期、**reserveSlots 原子预约**）；**cron 解析与调度器**（别名、Vixie DOM/DOW、同一分钟去重、skip_if_running、仅改 enabled 不重置 lastFiredMinute、持久化回放）。
-- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）、Bearer Token（写保护与全保护两种模式、WebSocket 查询参数）、WebSocket 秒连秒断压力回归、目录监控端到端、**真实 Python Runner 池**（两个进程并行执行两个 0.8 s 的测试总耗时 < 1.5 s；`kill -9` 其中一个进程后按需自愈且孤儿进程组被清理；手动重启替换全部进程；无 `python3` 时跳过）、**真实 Node.js Runner**（同一套 login/calculator/checkout 规范全部通过；断言失败带回 `AssertionError` 堆栈；未实现步骤报 error；无 `node` 时跳过）、**parallel_streams**（单个测试的两个 0.8 s 场景拆到两个 Python 进程，总耗时 < 1.5 s，结果顺序与规范一致）、**步骤重试**（mock flaky 步骤 `step_retry=1` 后通过且 `attempts=2`；越界 400）、**自举**（`selfcheck.spec` 经 Python / Node 调用本进程 HTTP API，并断言入队的 `calculator.spec` 子测试随后通过）、**测试计划**（CRUD、非法 cron 400、立即运行 202 且 `submitted_by=schedule:<id>`、停用）。
+- **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405、请求过滤器；鉴权策略（读/写、凭据来源、常量时间比较）；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话、**parallel_streams 场景重叠且结果保序**、**step_retry / retry:N 仅重试 FAILED**、**trendRuns / compareTests 自动基线**）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）；报表（JUnit 结构与计数、转义、空结果、HTML 自包含）；规范目录监控；Runner 池（注入假 Runner：并行分配与会话绑定、阻塞等待、逐槽重启与预算、健康槽位优先、并发安全收缩、停止/重启生命周期、**reserveSlots 原子预约**）；**cron 解析与调度器**（别名、Vixie DOM/DOW、同一分钟去重、skip_if_running、仅改 enabled 不重置 lastFiredMinute、持久化回放）；**趋势纯函数**（分组/截断、回归改善、数据行、added/removed）。
+- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）、Bearer Token（写保护与全保护两种模式、WebSocket 查询参数）、WebSocket 秒连秒断压力回归、目录监控端到端、**真实 Python Runner 池**（两个进程并行执行两个 0.8 s 的测试总耗时 < 1.5 s；`kill -9` 其中一个进程后按需自愈且孤儿进程组被清理；手动重启替换全部进程；无 `python3` 时跳过）、**真实 Node.js Runner**（同一套 login/calculator/checkout 规范全部通过；断言失败带回 `AssertionError` 堆栈；未实现步骤报 error；无 `node` 时跳过）、**parallel_streams**（单个测试的两个 0.8 s 场景拆到两个 Python 进程，总耗时 < 1.5 s，结果顺序与规范一致）、**步骤重试**（mock flaky 步骤 `step_retry=1` 后通过且 `attempts=2`；越界 400）、**自举**（`selfcheck.spec` 经 Python / Node 调用本进程 HTTP API，并断言入队的 `calculator.spec` 子测试随后通过）、**测试计划**（CRUD、非法 cron 400、立即运行 202 且 `submitted_by=schedule:<id>`、停用）、**趋势与对比**（两次 `login.spec` 后 `GET /trends` 与 `GET /tests/{id}/compare` 自动基线）。
 - **并发正确性**：所有线程句柄的赋值与检查共享同一把锁（WebSocket 读线程见 `Connection::readerMutex`）；停止流程在持锁状态下改标志再 `notify`，避免丢失唤醒；终态记录先落盘再对外可见。排查偶发问题时用 ThreadSanitizer 构建（`-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"`）运行集成测试，当前零告警。
 - **协议测试**：`python_runner_protocol`（子进程启动 Python Runner，验证 ping/get_steps/execute_step/hook/kill 与错误路径）；`node_runner_protocol`（同样覆盖 async 步骤等待、`console.log` 不污染协议通道、缺失实现目录、非法 JSON 不杀死进程）。
 - **CI**：Ubuntu（g++、clang++）与 macOS，`-Wall -Wextra -Wpedantic -Werror`，`ctest`，二进制冒烟（curl），独立运行 Python / Node 协议测试；CI 安装 Python 3.x 与 Node.js 22。

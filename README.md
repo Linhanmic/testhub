@@ -12,7 +12,7 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 |------|------|
 | 运行模式 | 守护进程常驻；`--daemon`、PID 文件、JSON 配置文件、CLI 覆盖 |
 | 规范 | `# 规范` / `## 场景` / `* 步骤`、`tags:`、规范级数据表（数据驱动）、上下文步骤、`___` 清理步骤、概念（`.cpt`）展开、`"静态"` / `<动态>` / `<file:>` / `<table:>` 参数、内联表格；目录监控：编辑器/git 改动自动生效并推送 `specs.reloaded` |
-| 执行引擎 | 优先级队列、标签过滤表达式（`smoke & !slow`）、场景名过滤、fail_fast、测试/步骤超时、取消、`failed_only` 重跑、结果历史；**步骤重试**（请求 `step_retry` 或标签 `retry:N`，仅对 FAILED）；**并行流**（`parallel_streams`）把单个测试的场景拆到多个 Runner 进程；**测试计划**（UTC cron 周期性提交，`skip_if_running` 避免堆积） |
+| 执行引擎 | 优先级队列、标签过滤表达式（`smoke & !slow`）、场景名过滤、fail_fast、测试/步骤超时、取消、`failed_only` 重跑、结果历史；**步骤重试**（请求 `step_retry` 或标签 `retry:N`，仅对 FAILED）；**并行流**（`parallel_streams`）把单个测试的场景拆到多个 Runner 进程；**测试计划**（UTC cron 周期性提交，`skip_if_running` 避免堆积）；**结果趋势与对比**（按规范聚合通过率/耗时，场景级回归/改善） |
 | 持久化 | 已完成的测试以 JSON 落盘（默认 `data/results/`），重启后自动回放历史与统计；测试计划落在 `data/schedules/` |
 | 报表 | 按需导出 JUnit XML（供 Jenkins / GitLab / GitHub Actions 收集）与自包含 HTML 报告；UI 一键下载 |
 | 回调 | 请求携带 `callback_url`，测试结束后 POST JSON 摘要（含失败场景清单与报表链接），失败按指数退避重试 |
@@ -20,8 +20,8 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 | Runner | 跨平台子进程桥接 + JSON-lines 协议；内置 mock Runner；**Python** 与 **Node.js** 两个参考 Runner（步骤注册、钩子、数据表、消息；Node 支持 async 步骤），同一套 .spec 可互换执行；**Runner 池**：默认每个并发测试独占一个进程，`parallel_streams` 可让一个测试占用多个进程；进程逐个自愈、按需重启 |
 | 服务端 | 多线程 HTTP/1.1（keep-alive、流水线、Content-Length、超时、`{param}` 路由、CORS、HEAD/OPTIONS、ETag 静态资源、SPA 回退） |
 | 实时性 | 异步事件总线；`/ws/v1/events` WebSocket 推送（按类型/测试 ID 订阅、历史回放） |
-| Web UI | 内嵌单页应用：总览、提交测试、测试记录、**测试计划（cron）**、结果树（搜索 / 只看失败）、运行中实时执行树、规范浏览/编辑/校验、Runner 状态、事件流（暂停 / 导出）、键盘快捷键、暗色模式 |
-| 质量 | 86 个单元测试 + 20 个 HTTP/WS 集成测试 + 7 个 Python 协议测试 + 12 个 Node.js 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
+| Web UI | 内嵌单页应用：总览、提交测试、测试记录、**结果趋势**、**测试计划（cron）**、结果树（搜索 / 只看失败）、运行中实时执行树、规范浏览/编辑/校验、Runner 状态、事件流（暂停 / 导出）、键盘快捷键、暗色模式 |
+| 质量 | 90 个单元测试 + 21 个 HTTP/WS 集成测试 + 7 个 Python 协议测试 + 12 个 Node.js 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
 
 ## 快速开始
 
@@ -69,6 +69,8 @@ curl http://localhost:8080/api/v1/tests/test-20260910-142940-001          # 状�
 curl http://localhost:8080/api/v1/tests/test-20260910-142940-001/result   # 结果树
 curl -o report.xml  "http://localhost:8080/api/v1/tests/test-20260910-142940-001/report?format=junit"  # JUnit XML
 curl -o report.html "http://localhost:8080/api/v1/tests/test-20260910-142940-001/report?format=html"   # HTML 报告
+curl "http://localhost:8080/api/v1/trends?spec=login.spec"                   # 该规范历次通过率
+curl "http://localhost:8080/api/v1/tests/test-20260910-142940-001/compare"   # 相对上次的场景对比
 ```
 
 `spec_files` 为空数组时表示运行规范目录下的全部规范。JUnit XML 可直接交给 Jenkins、GitLab CI（`artifacts:reports:junit`）或 GitHub Actions 的测试报告插件。
@@ -147,6 +149,8 @@ Runner 启动时会加载 `--dir` 下 `step_impl/` 中的全部 `.py` / `.js` �
 | GET | `/api/v1/tests/{id}/result` | 结果树（未完成返回 202） |
 | GET | `/api/v1/tests/{id}/report?format=junit\|html&download=1` | JUnit XML / HTML 报表（未完成返回 409） |
 | GET | `/api/v1/tests/{id}/events` | 该测试的事件历史 |
+| GET | `/api/v1/tests/{id}/compare?with=` | 场景级对比；`with` 空则自动选同规范上一终态（404 表示没有可对比的基线） |
+| GET | `/api/v1/trends?spec=&limit=` | 按规范聚合历次通过率/耗时（默认 limit=50，上限 200；`spec` 为空时含 `(all)` 总览） |
 | POST | `/api/v1/tests/{id}/cancel` | 取消（已结束返回 409） |
 | DELETE | `/api/v1/tests/{id}` | 取消或删除记录 |
 | POST | `/api/v1/tests/{id}/rerun` | 重跑（`{"failed_only": true}` 仅重跑失败场景） |

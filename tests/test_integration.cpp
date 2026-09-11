@@ -1158,3 +1158,52 @@ TEST_CASE("integration: schedules CRUD, fire-now, invalid cron") {
     CHECK_EQ(request(s.port, "GET", "/api/v1/schedules/" + id).status, 404);
     CHECK_EQ(request(s.port, "GET", "/api/v1/schedules").json()["count"].asInt(), 0);
 }
+
+TEST_CASE("integration: trends and compare against previous login.spec run") {
+    Server s;
+    CHECK_EQ(request(s.port, "GET", "/api/v1/trends").json()["count"].asInt(), 0);
+    CHECK_EQ(request(s.port, "GET", "/api/v1/tests/nope/compare").status, 404);
+
+    auto runLogin = [&](const char* name) {
+        HttpResult submit = request(s.port, "POST", "/api/v1/tests",
+                                    std::string("{\"spec_files\":[\"login.spec\"],\"name\":\"") + name + "\"}");
+        REQUIRE_EQ(submit.status, 202);
+        std::string id = submit.json()["test_id"].asString();
+        Json st = s.waitForTerminal(id);
+        REQUIRE(!st.isNull());
+        CHECK_EQ(st["state"].asString(), std::string("passed"));
+        return id;
+    };
+    std::string first = runLogin("trend-a");
+    std::string second = runLogin("trend-b");
+
+    HttpResult trends = request(s.port, "GET", "/api/v1/trends?spec=login.spec&limit=10");
+    REQUIRE_EQ(trends.status, 200);
+    Json series = trends.json();
+    REQUIRE_EQ(series["count"].asInt(), 1);
+    CHECK_EQ(series["specs"][0]["spec"].asString(), std::string("login.spec"));
+    CHECK(series["specs"][0]["runs"].asInt() >= 2);
+    CHECK(series["specs"][0]["latest_pass_rate"].asNumber() > 0.99);
+    CHECK_EQ(series["specs"][0]["points"].size(), static_cast<size_t>(series["specs"][0]["runs"].asInt()));
+
+    Json all = request(s.port, "GET", "/api/v1/trends").json();
+    CHECK(all["count"].asInt() >= 2);
+    CHECK_EQ(all["specs"][0]["spec"].asString(), std::string("(all)"));
+
+    HttpResult self = request(s.port, "GET", "/api/v1/tests/" + second + "/compare?with=" + second);
+    CHECK_EQ(self.status, 400);
+
+    HttpResult cmp = request(s.port, "GET", "/api/v1/tests/" + second + "/compare");
+    REQUIRE_EQ(cmp.status, 200);
+    Json body = cmp.json();
+    CHECK(body["baseline_auto"].asBool());
+    CHECK_EQ(body["baseline"]["test_id"].asString(), first);
+    CHECK_EQ(body["current"]["test_id"].asString(), second);
+    CHECK_EQ(body["summary"]["unchanged"].asInt(), 3);
+    CHECK_EQ(body["summary"]["regressed"].asInt(), 0);
+    CHECK_EQ(body["count"].asInt(), 3);
+
+    HttpResult with = request(s.port, "GET", "/api/v1/tests/" + second + "/compare?with=" + first);
+    CHECK_EQ(with.status, 200);
+    CHECK(!with.json()["baseline_auto"].asBool());
+}

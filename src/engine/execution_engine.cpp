@@ -20,6 +20,43 @@ namespace {
 
 std::string joinTags(const std::vector<std::string>& tags) { return StringUtil::join(tags, ","); }
 
+std::vector<std::string> recordSpecFiles(const TestRecord& r) {
+    std::vector<std::string> files;
+    if (r.hasResult) {
+        for (const auto& spec : r.result.specResults) {
+            if (!spec.specFile.empty()) files.push_back(spec.specFile);
+        }
+    }
+    if (files.empty()) files = r.resolvedSpecs;
+    if (files.empty()) files = r.request.specFiles;
+    std::sort(files.begin(), files.end());
+    files.erase(std::unique(files.begin(), files.end()), files.end());
+    return files;
+}
+
+TrendRun trendRunFrom(const TestRecord& r) {
+    TrendRun t;
+    t.testId = r.request.id;
+    t.name = r.request.name;
+    t.state = r.status.state;
+    t.endTime = r.status.endTime.time_since_epoch().count() != 0 ? r.status.endTime : r.status.submitTime;
+    t.duration = r.hasResult ? r.result.totalDuration : 0.0;
+    t.totalScenarios = r.hasResult ? r.result.totalScenarios : r.status.totalScenarios;
+    t.passedScenarios = r.hasResult ? r.result.passedScenarios : r.status.passedScenarios;
+    t.failedScenarios = r.hasResult ? r.result.failedScenarios : r.status.failedScenarios;
+    t.skippedScenarios = r.hasResult ? r.result.skippedScenarios : r.status.skippedScenarios;
+    t.specFiles = recordSpecFiles(r);
+    return t;
+}
+
+bool specSetsOverlap(const std::vector<std::string>& a, const std::vector<std::string>& b) {
+    if (a.empty() || b.empty()) return true;
+    for (const auto& x : a) {
+        if (std::find(b.begin(), b.end(), x) != b.end()) return true;
+    }
+    return false;
+}
+
 /** 从规范/场景标签解析 retry:N 或 retry-N（含可选的 <...> 包裹） */
 int retryFromTags(const std::vector<std::string>& tags) {
     int n = 0;
@@ -354,6 +391,75 @@ size_t ExecutionEngine::count(const std::string& state) const {
         if (testStateToString(kv.second.status.state) == state) ++n;
     }
     return n;
+}
+
+std::vector<TrendRun> ExecutionEngine::trendRuns() const {
+    std::lock_guard<std::mutex> lock(recordsMutex_);
+    std::vector<TrendRun> out;
+    out.reserve(order_.size());
+    for (const auto& id : order_) {
+        auto it = records_.find(id);
+        if (it == records_.end()) continue;
+        const TestRecord& r = it->second;
+        if (!r.hasResult || !isTerminalState(r.status.state)) continue;
+        if (r.status.state == TestState::CANCELLED) continue;
+        out.push_back(trendRunFrom(r));
+    }
+    return out;
+}
+
+std::optional<TestComparison> ExecutionEngine::compareTests(const std::string& currentId, const std::string& baselineId,
+                                                            std::string& error) const {
+    std::lock_guard<std::mutex> lock(recordsMutex_);
+    auto cit = records_.find(currentId);
+    if (cit == records_.end() || !cit->second.hasResult) {
+        error = "Test not found or not finished: " + currentId;
+        return std::nullopt;
+    }
+    const TestRecord* base = nullptr;
+    bool autoBase = baselineId.empty();
+    if (!autoBase) {
+        auto bit = records_.find(baselineId);
+        if (bit == records_.end() || !bit->second.hasResult) {
+            error = "Baseline test not found or not finished: " + baselineId;
+            return std::nullopt;
+        }
+        if (baselineId == currentId) {
+            error = "Cannot compare a test with itself";
+            return std::nullopt;
+        }
+        base = &bit->second;
+    } else {
+        auto specs = recordSpecFiles(cit->second);
+        for (auto it = order_.rbegin(); it != order_.rend(); ++it) {
+            if (*it == currentId) continue;
+            auto rit = records_.find(*it);
+            if (rit == records_.end() || !rit->second.hasResult || !isTerminalState(rit->second.status.state)) continue;
+            if (rit->second.status.state == TestState::CANCELLED) continue;
+            if (specSetsOverlap(specs, recordSpecFiles(rit->second))) {
+                base = &rit->second;
+                break;
+            }
+        }
+        if (!base) {
+            error = "No previous finished run sharing the same spec(s)";
+            return std::nullopt;
+        }
+    }
+    TestComparison c;
+    c.currentId = cit->second.request.id;
+    c.currentName = cit->second.request.name;
+    c.currentState = cit->second.status.state;
+    c.currentDuration = cit->second.result.totalDuration;
+    c.currentEnd = cit->second.status.endTime;
+    c.baselineId = base->request.id;
+    c.baselineName = base->request.name;
+    c.baselineState = base->status.state;
+    c.baselineDuration = base->result.totalDuration;
+    c.baselineEnd = base->status.endTime;
+    c.autoBaseline = autoBase;
+    c.diffs = compareScenarios(base->result, cit->second.result);
+    return c;
 }
 
 bool ExecutionEngine::remove(const std::string& testId) {

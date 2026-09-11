@@ -124,6 +124,30 @@ void TestHub::registerApiRoutes() {
         return HttpResponse::json(200, j);
     });
 
+    http.get("/api/v1/trends", [this](const HttpRequest& req) {
+        std::string spec = req.query("spec");
+        size_t limit = parseSize(req.query("limit"), 50, 200);
+        auto series = groupTrends(engine_->trendRuns(), spec, limit);
+        Json arr = Json::array();
+        for (const auto& s : series) arr.push(specTrendToJson(s));
+        Json j = Json::object();
+        j["specs"] = arr;
+        j["count"] = static_cast<int>(arr.size());
+        return HttpResponse::json(200, j);
+    });
+
+    http.get("/api/v1/tests/{id}/compare", [this](const HttpRequest& req) {
+        std::string error;
+        auto cmp = engine_->compareTests(req.param("id"), req.query("with"), error);
+        if (!cmp) {
+            int code = (error.find("not found") != std::string::npos || error.find("No previous") != std::string::npos)
+                           ? 404
+                           : 400;
+            return HttpResponse::error(code, error);
+        }
+        return HttpResponse::json(200, comparisonToJson(*cmp));
+    });
+
     http.del("/api/v1/tests", [this](const HttpRequest&) {
         size_t removed = engine_->clearHistory();
         Json j = Json::object();

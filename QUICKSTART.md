@@ -58,6 +58,8 @@ node runners/node/test_runner_protocol.js
 curl http://localhost:8080/api/v1/health
 curl -X POST http://localhost:8080/api/v1/tests -H 'Content-Type: application/json' -d '{"spec_files":["calculator.spec"]}'
 curl http://localhost:8080/api/v1/tests?limit=5
+curl "http://localhost:8080/api/v1/trends?spec=login.spec"
+curl "http://localhost:8080/api/v1/tests/<id>/compare"
 
 # 自举：用 .spec 经 HTTP API 验证本进程（需要 python/node Runner，不要用 mock）
 curl -X POST http://localhost:8080/api/v1/tests \
@@ -78,6 +80,7 @@ src/server/auth.h          AuthPolicy — Bearer Token 校验（HttpServer 请�
 src/server/web_ui.cpp      TestHub::registerWebUi() — 内嵌资源或 --web-dir，SPA 回退
 src/server/websocket_*     RFC 6455 握手/帧编解码，订阅过滤，EventBus 转发
 src/engine/execution_engine.*  提交 → 队列 → worker → 规范/场景/步骤执行 → 结果与事件
+src/engine/trends.h        结果趋势聚合与场景级对比（纯函数）
 src/engine/scheduler.*     UTC cron 测试计划（轮询 tick、JSON 落盘）
 src/engine/result_store.*  结果 JSON 落盘与启动回放
 src/report/report_writer.* JUnit XML / HTML 报表渲染

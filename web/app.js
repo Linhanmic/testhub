@@ -35,7 +35,9 @@
   };
   const STATE_LABEL = { queued: '排队中', running: '运行中', passed: '通过', failed: '失败', skipped: '跳过', cancelled: '已取消', error: '错误',
     connected: '已连接', disconnected: '未连接', connecting: '连接中', busy: '执行中' };
-  const pill = (state) => `<span class="pill ${esc(state)}">${esc(STATE_LABEL[state] || state)}</span>`;
+  const CHANGE_LABEL = { regressed: '回归', improved: '改善', still_failed: '仍失败', unchanged: '未变', added: '新增', removed: '移除' };
+  const pill = (state) => `<span class="pill ${esc(state)}">${esc(STATE_LABEL[state] || CHANGE_LABEL[state] || state)}</span>`;
+  const pct = (rate) => `${Math.round((Number(rate) || 0) * 100)}%`;
   const fmtIssue = (e) => (e.line > 0 ? `L${e.line}: ` : '') + e.message;
   const tags = (arr) => (arr || []).map((t) => `<span class="tag">${esc(t)}</span>`).join('') || '<span class="muted">-</span>';
   // 高亮步骤参数；给定 dataRow 时把 <列名> 替换为该行的实际值
@@ -189,7 +191,7 @@
   // ------------------------------------------------------------
   const routes = {};
   let cleanup = null;
-  const PAGE_TITLES = { dashboard: '总览', run: '提交测试', tests: '测试记录', schedules: '测试计划', specs: '规范文件', runner: 'Runner', events: '事件流' };
+  const PAGE_TITLES = { dashboard: '总览', run: '提交测试', tests: '测试记录', trends: '结果趋势', schedules: '测试计划', specs: '规范文件', runner: 'Runner', events: '事件流' };
   function navigate() {
     const hash = location.hash.replace(/^#\/?/, '') || 'dashboard';
     const [name, ...rest] = hash.split('/');
@@ -310,7 +312,7 @@
           <li><span>只看失败（结果树）</span><span class="keys"><kbd>f</kbd></span></li>
           <li><span>暂停 / 继续事件流</span><span class="keys"><kbd>p</kbd></span></li>
           <li><span>总览 / 提交 / 测试</span><span class="keys"><kbd>g</kbd> <kbd>d</kbd> · <kbd>g</kbd> <kbd>r</kbd> · <kbd>g</kbd> <kbd>t</kbd></span></li>
-          <li><span>计划 / 规范 / Runner / 事件</span><span class="keys"><kbd>g</kbd> <kbd>c</kbd> · <kbd>g</kbd> <kbd>s</kbd> · <kbd>g</kbd> <kbd>n</kbd> · <kbd>g</kbd> <kbd>e</kbd></span></li>
+          <li><span>计划 / 趋势 / 规范 / Runner / 事件</span><span class="keys"><kbd>g</kbd> <kbd>c</kbd> · <kbd>g</kbd> <kbd>a</kbd> · <kbd>g</kbd> <kbd>s</kbd> · <kbd>g</kbd> <kbd>n</kbd> · <kbd>g</kbd> <kbd>e</kbd></span></li>
           <li><span>关闭对话框</span><span class="keys"><kbd>Esc</kbd></span></li>
         </ul>
         <div class="flex" style="justify-content:flex-end"><button class="btn primary" type="button" data-x="close">关闭</button></div>
@@ -324,11 +326,12 @@
   // 页面：总览
   // ------------------------------------------------------------
   routes.dashboard = async (main) => {
-    const [status, tests, events] = await Promise.all([api('/status'), api('/tests?limit=10'), api('/events?limit=60')]);
+    const [status, tests, events, trends] = await Promise.all([api('/status'), api('/tests?limit=10'), api('/events?limit=60'), api('/trends?limit=20')]);
     const s = status.stats || {};
     const runner = status.runner || {};
     const passRate = s.total_scenarios ? Math.round((s.passed_scenarios / s.total_scenarios) * 100) : null;
     $('#brand-version').textContent = 'v' + status.version;
+    const dashSeries = overallSeries(trends);
 
     main.innerHTML = `
       ${header('总览', `TestHub ${esc(status.version)} · 运行 ${fmtDur(status.uptime_seconds)} · 规范目录 <code>${esc(status.specs_dir)}</code>`,
@@ -373,6 +376,10 @@
             </div>
           </div>
           <div class="card">
+            <div class="card-header"><h2>通过率趋势</h2><a class="small" href="#/trends">详情 →</a></div>
+            <div class="card-body" id="dash-trend">${renderDashTrend(dashSeries)}</div>
+          </div>
+          <div class="card">
             <div class="card-header"><h2>服务</h2></div>
             <div class="card-body"><dl class="kv">
               <dt>HTTP 请求</dt><dd>${status.http.requests}</dd>
@@ -394,7 +401,7 @@
       refreshTimer = setTimeout(async () => {
         refreshTimer = null;
         try {
-          const [st, t] = await Promise.all([api('/status'), api('/tests?limit=10')]);
+          const [st, t, tr] = await Promise.all([api('/status'), api('/tests?limit=10'), api('/trends?limit=20')]);
           const ss = st.stats;
           const activeEl = $('#st-active');
           if (!activeEl) return;  // 已离开总览页
@@ -403,6 +410,8 @@
           $('#st-failed').innerHTML = `${ss.failed}<span class="muted" style="font-size:16px"> / ${ss.errored}</span>`;
           $('#st-rate').textContent = ss.total_scenarios ? Math.round((ss.passed_scenarios / ss.total_scenarios) * 100) + '%' : '-';
           $('#recent-tests').innerHTML = renderTestTable(t.tests);
+          const trendEl = $('#dash-trend');
+          if (trendEl) trendEl.innerHTML = renderDashTrend(overallSeries(tr));
           const cb = st.callbacks, cbEl = $('#st-callbacks');
           if (cb && cbEl && cb.enabled) cbEl.innerHTML = `${cb.delivered} 送达${cb.failed ? ` · <span style="color:var(--fail)">${cb.failed} 失败</span>` : ''}${cb.pending ? ` · ${cb.pending} 待发` : ''}`;
           const w = st.spec_watcher, wEl = $('#st-watch');
@@ -467,6 +476,89 @@
     const bg = total ? `conic-gradient(${segs})` : 'var(--muted-soft)';
     return `<div class="donut" style="border-radius:50%;background:${bg};position:relative"><div style="position:absolute;inset:22px;border-radius:50%;background:var(--surface);display:grid;place-items:center;font-weight:700">${total}</div></div>
       <div class="legend">${items.map(([l, v, c]) => `<span style="--c:${c}">${l} <b>${v || 0}</b></span>`).join('')}</div>`;
+  }
+
+  function overallSeries(data) {
+    const specs = (data && data.specs) || [];
+    return specs.find((s) => s.spec === '(all)') || specs[0] || { points: [], runs: 0, latest_pass_rate: 0 };
+  }
+
+  function sparklineFigure(points, key, label, colorVar, includeHiddenTable = true) {
+    const list = points || [];
+    const values = list.map((p) => Number(p[key]) || 0);
+    const w = 240, h = 52, padX = 6, padY = 8;
+    let svg;
+    if (!values.length) {
+      svg = `<svg class="spark" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(label)}：暂无数据">
+        <text x="${w / 2}" y="${h / 2 + 4}" text-anchor="middle" fill="currentColor" font-size="11">暂无数据</text></svg>`;
+    } else {
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const flat = max === min;
+      const xy = values.map((v, i) => {
+        const x = values.length === 1 ? w / 2 : padX + (i * (w - 2 * padX)) / (values.length - 1);
+        const y = flat ? h / 2 : h - padY - ((v - min) / (max - min)) * (h - 2 * padY);
+        return [x, y];
+      });
+      const line = xy.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+      const last = xy[xy.length - 1];
+      const area = `${xy[0][0].toFixed(1)},${(h - padY).toFixed(1)} ${line} ${last[0].toFixed(1)},${(h - padY).toFixed(1)}`;
+      const latest = key === 'pass_rate' ? pct(values[values.length - 1]) : fmtDur(values[values.length - 1]);
+      svg = `<svg class="spark" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(label)}，${values.length} 次，最新 ${esc(latest)}" style="--spark-c:${esc(colorVar)}">
+        <polygon class="spark-fill" points="${area}"></polygon>
+        <polyline class="spark-line" points="${line}"></polyline>
+        <circle class="spark-dot" cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3"></circle>
+      </svg>`;
+    }
+    const table = `<table><caption>${esc(label)}</caption><thead><tr><th scope="col">次序</th><th scope="col">${esc(label)}</th></tr></thead><tbody>
+      ${list.map((p, i) => `<tr><th scope="row">${i + 1}</th><td>${key === 'pass_rate' ? pct(p.pass_rate) : fmtDur(p.duration)}</td></tr>`).join('')}</tbody></table>`;
+    return `<figure class="chart">${svg}<figcaption class="small muted">${esc(label)}</figcaption>${includeHiddenTable ? `<div class="visually-hidden">${table}</div>` : ''}</figure>`;
+  }
+
+  function trendPointsTable(s) {
+    if (!s.points || !s.points.length) return '';
+    const title = s.spec === '(all)' ? '全部规范' : s.spec;
+    return `<div class="table-wrap mt"><table>
+      <caption class="visually-hidden">${esc(title)} 历次运行</caption>
+      <thead><tr><th scope="col">测试</th><th scope="col">状态</th><th scope="col">通过率</th><th scope="col">场景</th><th scope="col">耗时</th><th scope="col">结束时间</th></tr></thead>
+      <tbody>${s.points.map((p) => `<tr class="clickable" data-id="${esc(p.test_id)}" onclick="location.hash='#/tests/${esc(p.test_id)}'">
+        <td><div class="mono">${esc(p.test_id)}</div>${p.name ? `<div class="muted small">${esc(p.name)}</div>` : ''}</td>
+        <td>${pill(p.state)}</td>
+        <td class="num">${pct(p.pass_rate)}</td>
+        <td class="num"><span style="color:var(--pass)">${p.passed_scenarios}</span> / ${p.total_scenarios}</td>
+        <td class="num">${fmtDur(p.duration)}</td>
+        <td class="nowrap muted" title="${esc(fmtTime(p.end_time))}">${rel(p.end_time)}</td>
+      </tr>`).join('')}</tbody></table></div>`;
+  }
+
+  function renderDashTrend(series) {
+    const pts = (series && series.points) || [];
+    if (!pts.length) return '<div class="empty">完成至少一次测试后显示通过率曲线</div>';
+    return `${sparklineFigure(pts, 'pass_rate', '场景通过率', 'var(--pass)')}
+      <div class="small muted mt">最近 ${pts.length} 次 · 最新 ${pct(series.latest_pass_rate)}</div>`;
+  }
+
+  function renderCompare(cmp) {
+    const s = cmp.summary || {};
+    const chips = ['regressed', 'improved', 'still_failed', 'unchanged', 'added', 'removed']
+      .map((k) => `<span class="pill ${k}">${CHANGE_LABEL[k]} ${s[k] || 0}</span>`).join('');
+    const rows = (cmp.scenarios || []).filter((r) => r.change !== 'unchanged');
+    const base = cmp.baseline || {};
+    const cur = cmp.current || {};
+    return `<div class="flex flex-wrap gap" style="margin-bottom:8px">${chips}</div>
+      <div class="small muted mb">相对${cmp.baseline_auto ? '自动选择的上一轮' : '指定基线'}
+        <a href="#/tests/${esc(base.test_id)}">${esc(base.test_id)}</a>
+        ${pill(base.state)} ${fmtDur(base.duration)} → ${pill(cur.state)} ${fmtDur(cur.duration)}</div>
+      ${rows.length ? `<div class="table-wrap"><table>
+        <caption class="visually-hidden">场景级对比（仅变化项）</caption>
+        <thead><tr><th scope="col">场景</th><th scope="col">变化</th><th scope="col">上次</th><th scope="col">本次</th><th scope="col">耗时差</th></tr></thead>
+        <tbody>${rows.map((r) => `<tr>
+          <td>${esc(r.scenario)}${r.data_row_index >= 0 ? ` <span class="muted small">行 ${r.data_row_index + 1}</span>` : ''}<div class="muted small mono">${esc(r.spec)}</div></td>
+          <td>${pill(r.change)}</td>
+          <td>${pill(r.baseline_state)}</td>
+          <td>${pill(r.current_state)}</td>
+          <td class="num">${r.duration_delta ? `${r.duration_delta > 0 ? '+' : '−'}${fmtDur(Math.abs(r.duration_delta))}` : '-'}</td>
+        </tr>`).join('')}</tbody></table></div>` : '<div class="muted small">场景结果与上次相同</div>'}`;
   }
 
   function renderTestTable(list, opts = {}) {
@@ -676,11 +768,12 @@
       main.innerHTML = `
         ${header(`<span class="mono">${esc(id)}</span> ${pill(status.state)}`, req.name ? esc(req.name) : '', `
           ${active ? `<button class="btn danger" data-act="cancel" data-id="${esc(id)}">取消</button>` : `<button class="btn" data-act="rerun" data-id="${esc(id)}">重跑</button>${status.state === 'failed' ? `<button class="btn" data-act="rerun-failed" data-id="${esc(id)}">仅重跑失败</button>` : ''}<button class="btn danger" data-act="delete" data-id="${esc(id)}">删除</button>`}
-          ${result ? `<a class="btn" href="/api/v1/tests/${encodeURIComponent(id)}/report?format=html${auth.qs('&amp;')}" target="_blank" rel="noopener" title="在新标签页打开 HTML 报告">HTML 报告</a><a class="btn" href="/api/v1/tests/${encodeURIComponent(id)}/report?format=junit&amp;download=1${auth.qs('&amp;')}" title="下载 JUnit XML">JUnit XML</a>` : ''}
+          ${result ? `<button class="btn" type="button" id="btn-compare">对比上次</button><a class="btn" href="/api/v1/tests/${encodeURIComponent(id)}/report?format=html${auth.qs('&amp;')}" target="_blank" rel="noopener" title="在新标签页打开 HTML 报告">HTML 报告</a><a class="btn" href="/api/v1/tests/${encodeURIComponent(id)}/report?format=junit&amp;download=1${auth.qs('&amp;')}" title="下载 JUnit XML">JUnit XML</a>` : ''}
           <a class="btn" href="#/tests">← 列表</a>`)}
         <div class="grid grid-main">
           <div class="grid" style="align-content:start">
             <div class="card"><div class="card-body" id="status-card">${statusCardHtml()}</div></div>
+            ${result ? `<div class="card" id="compare-card"><div class="card-header"><h2>与上次对比</h2><a class="small" href="#/trends">趋势 →</a></div><div class="card-body" id="compare-body"><div class="muted small">加载中…</div></div></div>` : ''}
             <div id="result-tree">${treeHtml()}</div>
           </div>
           <div class="grid" style="align-content:start">
@@ -713,9 +806,25 @@
         </div>`;
       bindTree(main);
       paintTreeFilter();
+      if (result) paintCompare();
+    };
+    const paintCompare = async () => {
+      const body = $('#compare-body', main);
+      if (!body) return;
+      try {
+        body.innerHTML = renderCompare(await api(`/tests/${id}/compare`));
+      } catch (e) {
+        body.innerHTML = `<div class="muted small">${esc(e.status === 404 ? '尚无上一轮可对比（需要同规范的另一次终态结果）' : e.message)}</div>`;
+      }
     };
     render();
     main.addEventListener('click', async (e) => {
+      if (e.target.closest('#btn-compare')) {
+        const card = $('#compare-card', main);
+        if (card) card.scrollIntoView({ block: 'nearest' });
+        paintCompare();
+        return;
+      }
       const b = e.target.closest('button[data-act]');
       if (!b) return;
       const deleted = await handleTestAction(b.dataset.act, b.dataset.id);
@@ -1180,6 +1289,50 @@
   };
 
   // ------------------------------------------------------------
+  // 页面：结果趋势
+  // ------------------------------------------------------------
+  routes.trends = async (main) => {
+    const load = (spec) => api('/trends?limit=50' + (spec ? `&spec=${encodeURIComponent(spec)}` : ''));
+    const data0 = await load('');
+    const specNames = (data0.specs || []).filter((s) => s.spec !== '(all)').map((s) => s.spec);
+    const paint = (data) => {
+      const series = data.specs || [];
+      const host = $('#trends-body', main);
+      const count = $('#trends-count', main);
+      if (count) count.textContent = series.length ? `${series.reduce((n, s) => Math.max(n, s.runs || 0), 0)} 次运行` : '暂无数据';
+      if (!host) return;
+      host.innerHTML = series.map((s) => {
+        const title = s.spec === '(all)' ? '全部规范' : s.spec;
+        return `<div class="card">
+          <div class="card-header"><h2>${esc(title)}</h2>
+            <span class="muted small">${s.runs} 次 · 最近通过率 ${pct(s.latest_pass_rate)} · 平均 ${fmtDur(s.avg_duration)}</span></div>
+          <div class="card-body">
+            <div class="chart-pair">
+              ${sparklineFigure(s.points, 'pass_rate', `${title} 通过率`, 'var(--pass)', false)}
+              ${sparklineFigure(s.points, 'duration', `${title} 耗时`, 'var(--info)', false)}
+            </div>
+            ${trendPointsTable(s)}
+          </div>
+        </div>`;
+      }).join('') || '<div class="card"><div class="empty">还没有已完成的测试。提交几次后即可看到通过率与耗时曲线。</div></div>';
+    };
+    main.innerHTML = `${header('结果趋势', '同一规范历次通过率与耗时（已取消的测试不计入）', `<a class="btn" href="#/tests">测试记录</a>`)}
+      <div class="toolbar">
+        <label for="trend-spec">规范</label>
+        <select id="trend-spec">
+          <option value="">全部</option>
+          ${specNames.map((f) => `<option value="${esc(f)}">${esc(f)}</option>`).join('')}
+        </select>
+        <span class="muted small" id="trends-count"></span>
+      </div>
+      <div class="grid" id="trends-body"></div>`;
+    paint(data0);
+    $('#trend-spec', main).addEventListener('change', async (e) => {
+      try { paint(await load(e.target.value)); } catch (err) { toast(err.message, 'error'); }
+    });
+  };
+
+  // ------------------------------------------------------------
   // 页面：规范文件
   // ------------------------------------------------------------
   function highlightSpec(text) {
@@ -1459,7 +1612,7 @@
     }
     if (goChord && Date.now() - goChord < 800) {
       goChord = null;
-      const map = { d: '#/dashboard', h: '#/dashboard', r: '#/run', t: '#/tests', c: '#/schedules', s: '#/specs', n: '#/runner', e: '#/events' };
+      const map = { d: '#/dashboard', h: '#/dashboard', r: '#/run', t: '#/tests', a: '#/trends', c: '#/schedules', s: '#/specs', n: '#/runner', e: '#/events' };
       if (map[e.key]) { e.preventDefault(); location.hash = map[e.key]; }
     } else {
       goChord = null;
