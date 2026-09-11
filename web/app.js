@@ -313,6 +313,7 @@
           <li><span>暂停 / 继续事件流</span><span class="keys"><kbd>p</kbd></span></li>
           <li><span>总览 / 提交 / 测试</span><span class="keys"><kbd>g</kbd> <kbd>d</kbd> · <kbd>g</kbd> <kbd>r</kbd> · <kbd>g</kbd> <kbd>t</kbd></span></li>
           <li><span>计划 / 趋势 / 规范 / Runner / 事件</span><span class="keys"><kbd>g</kbd> <kbd>c</kbd> · <kbd>g</kbd> <kbd>a</kbd> · <kbd>g</kbd> <kbd>s</kbd> · <kbd>g</kbd> <kbd>n</kbd> · <kbd>g</kbd> <kbd>e</kbd></span></li>
+          <li><span>规范编辑器：步骤补全</span><span class="keys"><kbd>Ctrl</kbd> <kbd>Space</kbd></span></li>
           <li><span>关闭对话框</span><span class="keys"><kbd>Esc</kbd></span></li>
         </ul>
         <div class="flex" style="justify-content:flex-end"><button class="btn primary" type="button" data-x="close">关闭</button></div>
@@ -1335,8 +1336,8 @@
   // ------------------------------------------------------------
   // 页面：规范文件
   // ------------------------------------------------------------
-  function highlightSpec(text) {
-    return text.split('\n').map((line, i) => {
+  function highlightSpec(text, withLines = true) {
+    return String(text ?? '').split('\n').map((line, i) => {
       const t = line.trim();
       let cls = 'cm';
       if (/^#\s/.test(t) || /^[=]{3,}$/.test(t)) cls = 'h1';
@@ -1345,8 +1346,156 @@
       else if (/^tags:/i.test(t)) cls = 'tg';
       else if (t.startsWith('|')) cls = 'tb';
       else if (/^_{3,}$/.test(t)) cls = 'h2';
-      return `<span class="ln">${i + 1}</span><span class="${cls}">${cls === 'stp' ? highlightStep(line) : esc(line)}</span>`;
+      const body = cls === 'stp' ? highlightStep(line) : esc(line);
+      return withLines
+        ? `<span class="ln">${i + 1}</span><span class="${cls}">${body}</span>`
+        : `<span class="${cls}">${body || ' '}</span>`;
     }).join('\n');
+  }
+
+  function stepLineAtCursor(ta) {
+    const pos = ta.selectionStart;
+    const before = ta.value.slice(0, pos);
+    const lineStart = before.lastIndexOf('\n') + 1;
+    const line = before.slice(lineStart);
+    const m = line.match(/^(\s*\*\s*)(.*)$/);
+    if (!m) return null;
+    return { lineStart, bullet: m[1], query: m[2], from: lineStart + m[1].length, to: pos };
+  }
+
+  function filterStepCatalog(catalog, query) {
+    const q = String(query || '').trim().toLowerCase();
+    const scored = [];
+    for (const item of catalog) {
+      const label = (item.label || '').toLowerCase();
+      if (!q) { scored.push(item); continue; }
+      if (label.includes(q)) scored.push(item);
+    }
+    return scored.slice(0, 12);
+  }
+
+  function bindSpecEditor(ta, catalog) {
+    const shell = ta.closest('.editor-shell');
+    const hl = shell && shell.querySelector('.editor-hl');
+    const pop = shell && shell.querySelector('.ac-pop');
+    if (!shell || !hl || !pop) return;
+    const hint = $('#editor-hint');
+    let items = [];
+    let active = 0;
+    let open = false;
+
+    const paintHl = () => {
+      hl.innerHTML = highlightSpec(ta.value, false) + '\n';
+      hl.scrollTop = ta.scrollTop;
+      hl.scrollLeft = ta.scrollLeft;
+    };
+    const close = () => {
+      if (!open) return;
+      open = false;
+      pop.hidden = true;
+      pop.innerHTML = '';
+      ta.setAttribute('aria-expanded', 'false');
+      ta.removeAttribute('aria-activedescendant');
+    };
+    const renderList = () => {
+      pop.innerHTML = items.map((it, i) => `<li role="option" id="ac-opt-${i}" aria-selected="${i === active ? 'true' : 'false'}">
+        <span class="ac-label">${highlightStep(it.label)}</span>
+        <span class="tag">${it.kind === 'concept' ? '概念' : '步骤'}</span>
+      </li>`).join('') || '<li class="muted small" role="presentation">没有匹配的步骤</li>';
+    };
+    const positionPop = () => {
+      const mirror = document.createElement('div');
+      const st = getComputedStyle(ta);
+      ['font', 'fontSize', 'fontFamily', 'lineHeight', 'padding', 'border', 'boxSizing', 'letterSpacing', 'tabSize'].forEach((p) => { mirror.style[p] = st[p]; });
+      mirror.style.position = 'absolute';
+      mirror.style.visibility = 'hidden';
+      mirror.style.whiteSpace = 'pre-wrap';
+      mirror.style.wordWrap = 'break-word';
+      mirror.style.width = `${ta.clientWidth}px`;
+      mirror.textContent = ta.value.slice(0, ta.selectionStart);
+      const mark = document.createElement('span');
+      mark.textContent = '\u200b';
+      mirror.appendChild(mark);
+      document.body.appendChild(mirror);
+      const top = mark.offsetTop - ta.scrollTop + parseFloat(st.borderTopWidth || '0');
+      const left = mark.offsetLeft - ta.scrollLeft;
+      mirror.remove();
+      pop.style.top = `${Math.max(8, ta.offsetTop + top + 18)}px`;
+      pop.style.left = `${Math.max(8, Math.min(ta.offsetLeft + left, shell.clientWidth - 320))}px`;
+    };
+    const apply = (item) => {
+      if (!item) return;
+      const ctx = stepLineAtCursor(ta);
+      let next, caret;
+      if (!ctx) {
+        const ins = '* ' + item.insert;
+        next = ta.value.slice(0, ta.selectionStart) + ins + ta.value.slice(ta.selectionEnd);
+        caret = ta.selectionStart + ins.length;
+      } else {
+        const after = ta.value.slice(ctx.to);
+        const nl = after.indexOf('\n');
+        const rest = nl < 0 ? '' : after.slice(nl);
+        next = ta.value.slice(0, ctx.from) + item.insert + rest;
+        caret = ctx.from + item.insert.length;
+      }
+      ta.value = next;
+      ta.setSelectionRange(caret, caret);
+      paintHl();
+      close();
+      ta.focus();
+    };
+    const show = (force) => {
+      const ctx = stepLineAtCursor(ta);
+      if (!ctx && !force) { close(); return; }
+      const query = ctx ? ctx.query : '';
+      items = filterStepCatalog(catalog, query);
+      if (!items.length && !force) { close(); return; }
+      active = 0;
+      open = true;
+      pop.hidden = false;
+      ta.setAttribute('aria-expanded', 'true');
+      renderList();
+      positionPop();
+      const first = pop.querySelector('[role=option]');
+      if (first) ta.setAttribute('aria-activedescendant', first.id);
+    };
+    const move = (delta) => {
+      if (!open || !items.length) return;
+      active = (active + delta + items.length) % items.length;
+      renderList();
+      const el = pop.querySelector(`[role=option][aria-selected=true]`);
+      if (el) { ta.setAttribute('aria-activedescendant', el.id); el.scrollIntoView({ block: 'nearest' }); }
+    };
+
+    paintHl();
+    ta.addEventListener('input', () => { paintHl(); show(false); });
+    ta.addEventListener('scroll', () => { hl.scrollTop = ta.scrollTop; hl.scrollLeft = ta.scrollLeft; if (open) positionPop(); });
+    ta.addEventListener('click', () => { if (open) positionPop(); });
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && open) { e.preventDefault(); close(); return; }
+      if ((e.ctrlKey || e.metaKey) && e.key === ' ' ) { e.preventDefault(); show(true); return; }
+      if (!open) return;
+      if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
+      else if (e.key === 'Enter' || e.key === 'Tab') {
+        if (items[active]) { e.preventDefault(); apply(items[active]); }
+      }
+    });
+    pop.addEventListener('mousedown', (e) => {
+      const li = e.target.closest('[role=option]');
+      if (!li) return;
+      e.preventDefault();
+      const idx = [...pop.querySelectorAll('[role=option]')].indexOf(li);
+      if (idx >= 0) apply(items[idx]);
+    });
+    if (hint) {
+      const n = catalog.filter((x) => x.kind === 'step').length;
+      const c = catalog.filter((x) => x.kind === 'concept').length;
+      hint.textContent = n
+        ? `可补全 ${n} 个 Runner 步骤${c ? `、${c} 个概念` : ''}。在 * 行输入，或 Ctrl+Space /「步骤补全」。`
+        : (c ? `当前 Runner 未报告步骤；可补全 ${c} 个概念。在 * 行输入或 Ctrl+Space。` : '当前没有可补全的步骤（mock Runner 不报告实现列表）。');
+    }
+    return { open: () => show(true) };
   }
   routes.specs = async (main, [file]) => {
     if (file) return specDetail(main, file);
@@ -1401,9 +1550,24 @@
     const sp = data.spec || {};
     // Runner 报告的已实现步骤（mock Runner 不报告 -> 不做标记）
     let implemented = null;
+    const stepCatalog = [];
     try {
       const rs = await api('/runner/steps');
-      if (rs.reported) implemented = new Set(rs.steps.map((x) => x.parameterized_text));
+      if (rs.reported) {
+        implemented = new Set(rs.steps.map((x) => x.parameterized_text));
+        for (const s of rs.steps || []) {
+          const label = s.text || s.parameterized_text;
+          if (label) stepCatalog.push({ insert: label, label, kind: 'step' });
+        }
+      }
+    } catch {}
+    try {
+      const cs = await api('/concepts');
+      for (const c of cs.concepts || []) {
+        if (!c.heading) continue;
+        if (stepCatalog.some((x) => x.insert === c.heading)) continue;
+        stepCatalog.push({ insert: c.heading, label: c.heading, kind: 'concept' });
+      }
     } catch {}
     const countMissing = () => {
       if (!implemented) return 0;
@@ -1433,12 +1597,26 @@
         </div>`;
         bindTree(body);
       } else if (tab === 'source') {
-        body.innerHTML = `<div class="card"><pre class="code-view">${highlightSpec(data.content)}</pre></div>`;
+        body.innerHTML = `<div class="card"><pre class="code-view" tabindex="0">${highlightSpec(data.content)}</pre></div>`;
       } else {
         body.innerHTML = `<div class="card"><div class="card-body form">
-          <textarea class="editor" id="editor" spellcheck="false">${esc(data.content)}</textarea>
-          <div class="flex"><button class="btn primary" id="save-spec">保存</button><button class="btn" id="validate-spec">校验</button><span class="muted small" id="edit-msg"></span></div>
+          <div class="editor-shell">
+            <pre class="editor-hl" id="editor-hl" aria-hidden="true"></pre>
+            <label class="visually-hidden" for="editor">规范源码</label>
+            <textarea class="editor" id="editor" spellcheck="false" autocomplete="off" autocapitalize="off"
+              aria-autocomplete="list" aria-expanded="false" aria-controls="step-ac"
+              aria-describedby="editor-hint">${esc(data.content)}</textarea>
+            <ul class="ac-pop" id="step-ac" role="listbox" hidden></ul>
+          </div>
+          <p class="small muted" id="editor-hint"></p>
+          <div class="flex"><button class="btn primary" id="save-spec" type="button">保存</button>
+            <button class="btn" id="validate-spec" type="button">校验</button>
+            <button class="btn" id="ac-open" type="button">步骤补全</button>
+            <span class="muted small" id="edit-msg"></span></div>
           <div id="edit-out"></div></div></div>`;
+        const editor = $('#editor');
+        const bound = bindSpecEditor(editor, stepCatalog);
+        $('#ac-open').onclick = () => { editor.focus(); bound.open(); };
         $('#validate-spec').onclick = async () => {
           const r = await api('/specs/validate', { method: 'POST', body: { content: $('#editor').value, file } });
           const res = r.results[0];

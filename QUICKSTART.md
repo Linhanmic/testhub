@@ -128,7 +128,7 @@ http.get("/api/v1/hello/{name}", [this](const HttpRequest& req) {
 
 ### 修改 Web UI
 
-前端是无构建步骤的原生 JS。用 `--web-dir web` 启动即可热改；提交前运行 `node --check web/app.js` 并重新 `cmake --build build`，让 `cmake/EmbedResources.cmake` 重新生成 `web_assets.cpp`。新增文件放到 `web/` 下即会被自动内嵌，MIME 类型在 `web_ui.cpp::mimeTypeFor()` 中维护。
+前端是无构建步骤的原生 JS。用 `--web-dir web` 启动即可热改；提交前运行 `node --check web/app.js` 并重新 `cmake --build build`，让 `cmake/EmbedResources.cmake` 重新生成 `web_assets.cpp`。规范详情的「编辑」页在 textarea 下叠一层语法高亮，并按 `GET /runner/steps` 与概念做步骤补全（`Ctrl+Space`）。
 
 ### 编写 Runner
 

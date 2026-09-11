@@ -239,6 +239,42 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 textarea { min-height: 120px; resize: vertical; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; }
 textarea.editor { min-height: 360px; }
+.editor-shell { position: relative; }
+.editor-hl, textarea.editor {
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.55;
+  padding: 10px 12px; margin: 0; border: 1px solid var(--border); border-radius: 8px;
+  white-space: pre-wrap; word-wrap: break-word; overflow: auto; tab-size: 4;
+  min-height: 360px; box-sizing: border-box; width: 100%;
+}
+.editor-hl {
+  position: absolute; inset: 0; pointer-events: none; color: var(--text);
+  background: var(--surface); overflow: hidden;
+}
+.editor-hl .h1 { color: var(--accent-text); font-weight: 700; }
+.editor-hl .h2 { color: var(--info); font-weight: 600; }
+.editor-hl .stp { color: var(--text); }
+.editor-hl .tg { color: var(--warn); }
+.editor-hl .tb { color: var(--text-muted); }
+.editor-hl .cm { color: var(--text-muted); font-style: italic; }
+textarea.editor {
+  position: relative; z-index: 1; background: transparent; color: transparent;
+  caret-color: var(--text); resize: vertical;
+}
+textarea.editor::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); color: transparent; }
+.ac-pop {
+  position: absolute; z-index: 5; min-width: 280px; max-width: min(480px, 100%);
+  max-height: 240px; overflow: auto; margin: 0; padding: 4px;
+  list-style: none; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: var(--shadow);
+}
+.ac-pop[hidden] { display: none !important; }
+.ac-pop [role=option] {
+  display: flex; align-items: center; gap: 8px; justify-content: space-between;
+  padding: 6px 10px; border-radius: 6px; cursor: pointer;
+  font-family: var(--mono); font-size: 12.5px;
+}
+.ac-pop [role=option][aria-selected=true], .ac-pop [role=option]:hover { background: var(--accent-soft); }
+.ac-pop .ac-label { min-width: 0; }
 .check { display: flex; align-items: center; gap: 8px; font-weight: 500; }
 .spec-picker { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 6px; background: var(--surface); }
 .spec-picker label { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-weight: 400; }

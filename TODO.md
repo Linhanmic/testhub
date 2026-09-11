@@ -38,7 +38,7 @@
 - [x] 结果对比与趋势（同一规范历次通过率、耗时曲线）
 - [x] 步骤级重试策略（`retry: n` 标签或请求参数）
 - [x] UI：结果树搜索/只看失败、事件流暂停与导出、键盘快捷键
-- [ ] UI：规范编辑器语法高亮与步骤自动补全（基于 `/runner/steps`）
+- [x] UI：规范编辑器语法高亮与步骤自动补全（基于 `/runner/steps`）
 - [ ] 多规范目录 / 多项目切换
 - [ ] Windows 打包与服务安装脚本；Dockerfile
 
@@ -218,6 +218,13 @@
 - 测试：趋势纯函数 3 + 引擎自动基线 1 单元；集成两次 login.spec 后 trends/compare。合计 130（90+21+7+12）
 - 浏览器实测：总览「通过率趋势」sparkline；`#/trends` 按规范卡片（通过率/耗时曲线 + 点数表），筛选 `login.spec` 只留一张；详情「与上次对比」对 trend-demo 修复后显示改善 1 / 未变 1；快捷键 `g` `a` 进入趋势页
 
+### 迭代 22 — 规范编辑器高亮与步骤补全
+
+- 编辑页用透明 textarea 叠在 `<pre>` 上做 Gauge 语法高亮（标题/步骤/标签/表格），与源码视图共用 `highlightSpec`
+- 补全目录来自 `GET /runner/steps`（`text`）与 `GET /concepts`（概念 heading）；在 `*` 步骤行过滤，Ctrl+Space 或「步骤补全」打开 listbox，Enter/点击插入
+- mock Runner 不报告步骤时仍可补全概念；Python/Node Runner 提供完整步骤列表
+- 浏览器实测（Python Runner `:18084`）：编辑 `login.spec` 时 `#`/`##`/`tags:` 着色；hint「可补全 26 个 Runner 步骤、1 个概念」；输入 `* 输入` 过滤出「输入用户名/密码/第一个数/第二个数」；点击插入 `* 输入用户名 <name>` 且 listbox 关闭；Esc 关闭补全；源码 tab 行号 + 同类高亮；未点保存，磁盘上的 `specs/login.spec` 未改
+
 ---
 
 ## 决策记录
@@ -242,7 +249,7 @@
 | 迭代 17 | 自举步骤不轮询子测试；Runner「应在线」接受 connected/busy；状态接口不向忙进程发 get_steps | 步骤里 `wait` 子测试会在 `-j 1` 时占满唯一 worker 造成死锁；自举过程中当前槽位必然是 busy；JSON-lines 同步协议下 get_steps 与 execute_step 不能重叠 |
 | 迭代 18 | 只重试 FAILED，不重试 TEST_ERROR / 取消 / 超时；请求与标签取 max，上限 5 | 缺实现、崩溃、超时再跑一遍通常无意义；断言抖动才适合有限次重试。标签可按场景覆盖全局请求，避免误伤稳定用例 |
 | 迭代 19 | 过滤用 `hidden="until-found"` 而非从 DOM 删除；快捷键在输入框与对话框内不拦截 | 页内查找仍能发现被「只看失败」藏起的通过步骤；避免在表单或快捷键说明里误触 `g`/`f`/`/` |
-| 迭代 21 | 趋势用 SVG sparkline + 表格，不引入 Chart.js；对比默认自动选同规范上一轮 | 保持零前端依赖；自动基线覆盖「这次比上次差在哪」的主路径，`with=` 仍可指定任意两次 |
+| 迭代 22 | 编辑器高亮用叠加层而非 contenteditable；补全同时收录 Runner 步骤与概念 | contenteditable 难与原生撤销/选区/读屏共存；mock 不报告步骤时概念仍能补全 |
 
 ---
 
