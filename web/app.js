@@ -217,7 +217,7 @@
     const d = ev.data || {};
     const parts = [];
     if (ev.test_id) parts.push(`<a href="#/tests/${esc(ev.test_id)}">${esc(ev.test_id)}</a>`);
-    for (const k of ['state', 'spec', 'scenario', 'step', 'progress', 'detail', 'message', 'error', 'name', 'url', 'status', 'attempts', 'source', 'action', 'file', 'files', 'created', 'updated', 'deleted', 'slot']) {
+    for (const k of ['state', 'spec', 'scenario', 'step', 'progress', 'detail', 'message', 'error', 'name', 'url', 'status', 'attempts', 'source', 'action', 'file', 'files', 'created', 'updated', 'deleted', 'slot', 'stream']) {
       if (d[k] !== undefined && d[k] !== '') {
         let v = d[k];
         if ((k === 'created' || k === 'updated' || k === 'deleted') && v === '0') continue;
@@ -553,6 +553,7 @@
               <dt>优先级</dt><dd>${esc(req.priority)}</dd>
               <dt>环境</dt><dd>${esc(req.environment)}</dd>
               <dt>fail_fast</dt><dd>${req.fail_fast ? '是' : '否'}</dd>
+              <dt>并行流</dt><dd>${req.parallel_streams > 1 ? req.parallel_streams + ' 个进程' : '顺序（1）'}</dd>
               <dt>超时</dt><dd>${req.timeout_ms ? req.timeout_ms + ' ms' : '默认'}</dd>
               ${req.callback_url ? `<dt>回调</dt><dd class="mono small">${esc(req.callback_url)}</dd>` : ''}
               <dt>提交</dt><dd>${fmtTime(status.submit_time)}</dd>
@@ -669,6 +670,7 @@
             <label class="field">优先级<select name="priority"><option value="normal">normal</option><option value="high">high</option><option value="urgent">urgent</option><option value="low">low</option></select></label>
             <label class="field">环境<input type="text" name="environment" value="default"></label>
             <label class="field">超时 (ms) <span class="help">0 表示默认</span><input type="number" name="timeout_ms" value="0" min="0" step="1000"></label>
+            <label class="field">并行流 <span class="help">把本测试的场景拆到多个 Runner 进程；1 为顺序执行</span><input type="number" name="parallel_streams" value="1" min="1" max="64" step="1"></label>
           </div>
           <label class="field">完成回调 URL <span class="help">可选，测试结束后 POST JSON 摘要（仅 http://，失败自动重试）</span><input type="url" name="callback_url" placeholder="http://ci.example.com/hooks/testhub"></label>
           <label class="check"><input type="checkbox" name="fail_fast"> 首个失败场景后停止 (fail_fast)</label>
@@ -686,6 +688,7 @@
       const sc = (fd.get('scenarios') || '').split(',').map((s) => s.trim()).filter(Boolean); if (sc.length) body.scenarios = sc;
       body.priority = fd.get('priority'); body.environment = fd.get('environment') || 'default';
       const to = parseInt(fd.get('timeout_ms') || '0', 10); if (to > 0) body.timeout_ms = to;
+      const streams = parseInt(fd.get('parallel_streams') || '1', 10); if (streams > 1) body.parallel_streams = streams;
       if (fd.get('fail_fast')) body.fail_fast = true;
       if ((fd.get('callback_url') || '').trim()) body.callback_url = fd.get('callback_url').trim();
       return body;
