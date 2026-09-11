@@ -21,7 +21,7 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 | 服务端 | 多线程 HTTP/1.1（keep-alive、流水线、Content-Length、超时、`{param}` 路由、CORS、HEAD/OPTIONS、ETag 静态资源、SPA 回退） |
 | 实时性 | 异步事件总线；`/ws/v1/events` WebSocket 推送（按类型/测试 ID 订阅、历史回放） |
 | Web UI | 内嵌单页应用：总览、提交测试、测试记录、结果树、运行中实时执行树、规范浏览/编辑/校验、Runner 状态、事件流、暗色模式 |
-| 质量 | 77 个单元测试 + 17 个 HTTP/WS 集成测试 + 7 个 Python 协议测试 + 12 个 Node.js 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
+| 质量 | 77 个单元测试 + 18 个 HTTP/WS 集成测试 + 7 个 Python 协议测试 + 12 个 Node.js 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
 
 ## 快速开始
 
@@ -74,6 +74,16 @@ curl -o report.html "http://localhost:8080/api/v1/tests/test-20260910-142940-001
 `spec_files` 为空数组时表示运行规范目录下的全部规范。JUnit XML 可直接交给 Jenkins、GitLab CI（`artifacts:reports:junit`）或 GitHub Actions 的测试报告插件。
 
 请求体其他可选字段：`name`、`scenarios`（场景名过滤）、`priority`（low/normal/high/urgent）、`environment`、`timeout_ms`、`fail_fast`、`parallel_streams`（把本测试的场景拆到多个 Runner 进程，默认 1；受池大小与场景数限制）、`metadata`（字符串键值，会原样带入报表与回调）、`callback_url`（测试结束后 POST JSON 摘要到该 `http://` 地址，失败按指数退避重试；载荷含 `state`、场景计数、`failed_scenarios_detail` 与 `links.report_junit` 等链接）。
+
+HTTP 绑定成功后，守护进程会把 `TESTHUB_URL`（`callbacks.public_base_url` 或 `http://127.0.0.1:<port>`）写入 Runner 环境；若启用了鉴权，同时写入 `TESTHUB_TOKEN`。用 Python 或 Node Runner 即可跑仓库自带的自举规范，用 TestHub 自己的 API 验证自己：
+
+```bash
+curl -X POST http://localhost:8080/api/v1/tests \
+  -H 'Content-Type: application/json' \
+  -d '{"spec_files":["selfcheck.spec"],"tags":["selfcheck"]}'
+```
+
+`selfcheck.spec` 只断言子测试提交返回 202，不会在步骤里等待子测试结束（避免 `-j 1` 占满唯一 worker）。mock Runner 不会真正发 HTTP，自举需要 `--language python` 或 `--language node`。
 
 ## 编写规范与步骤实现
 
@@ -128,7 +138,7 @@ Runner 启动时会加载 `--dir` 下 `step_impl/` 中的全部 `.py` / `.js` �
 | 方法 | 路径 | 描述 |
 |------|------|------|
 | GET | `/api/v1/health` | 健康检查 |
-| GET | `/api/v1/status` | 服务器统计（队列、运行中、通过/失败计数） |
+| GET | `/api/v1/status` | 服务器统计（队列、运行中、通过/失败计数、本机 `url`） |
 | GET | `/api/v1/config` | 当前生效配置 |
 | POST | `/api/v1/tests`（别名 `/tests/run`） | 提交测试，返回 202 与 `test_id` |
 | GET | `/api/v1/tests?state=&limit=&offset=` | 列出测试 |
@@ -225,7 +235,7 @@ src/
 web/                    Web UI 源码（index.html, app.js, app.css, favicon.svg）
 runners/python/         Python 参考 Runner、示例步骤实现、协议自测
 runners/node/           Node.js 参考 Runner（同一协议，async 步骤）、示例步骤实现、协议自测
-specs/                  示例规范（login / calculator / checkout / slow）与概念
+specs/                  示例规范（login / calculator / checkout / streams / selfcheck / slow）与概念
 tests/                  单元测试与集成测试（自带迷你测试框架）
 .github/workflows/      CI
 ```

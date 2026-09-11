@@ -185,6 +185,7 @@ class Runner {                      // 抽象接口
   - **生命周期**：`stopRunner()` / `restartRunner()` 先置 `draining_`（新会话等待），等待所有槽位释放，再并行停止/拉起全部进程；`lifecycleMutex_` 串行化这三种操作。
   - `getStatus()` 聚合：任一槽位在线即 `connected`（有会话占用则 `busy`），全部离线且有失败为 `error`；`pool_size / alive / busy / restart_count（总和）` 与 `runners[]` 明细（`index/state/pid/version/restart_count/steps_executed/busy/last_error`）。Runner 事件 `runner.*` 携带 `slot`。
   - 缓存 `get_steps` 结果（任一在线 Runner 即可回答，不占用槽位），供 `GET /runner/steps` 与 UI 的"未实现步骤"标注使用。
+  - **自举环境**：`TestHub::start()` 先 `HttpServer::start()` 绑定端口，再把 `TESTHUB_URL`（`callbacks.public_base_url`，否则 `http://127.0.0.1:<boundPort>`）写入 `execution.environment` 与 Runner 子进程环境（`ProcessRunner` `setenv`）；启用鉴权时同步注入 `TESTHUB_TOKEN`。`GET /status` 与 `server.started` 事件携带 `url`。`specs/selfcheck.spec` 通过 `runners/*/step_impl/api_steps.*` 用这些变量调用本进程 HTTP API；步骤只断言子测试 POST 202，不轮询其结束，以免 `-j 1` 死锁。自举期间当前槽位为 `busy`，「Runner 应在线」同时接受 `connected` / `busy`。
 
 ### 3.6 EventBus（`src/event/event_bus.*`）
 
@@ -335,8 +336,8 @@ Runner 可随时主动发送 `{"type":"log","level":"info","message":"..."}`，T
 
 两个参考 Runner 实现同一协议，同一套 `.spec` 可互换执行：
 
-- Python（`runners/python/testhub_runner.py`）：`@step("文本 <参数>")`、`@before_scenario` 等装饰器、`DataTable`、`Messages.write()`、`SkipStep`、`data_store.{suite,spec,scenario}` 与 `ExecutionContext`。
-- Node.js（`runners/node/testhub_runner.js`，零 npm 依赖）：`step('文本 <参数>', fn)`、`beforeScenario(fn)` 等、同样的 `DataTable` / `Messages` / `SkipStep` / `dataStore`；步骤函数可以是 `async`，Runner 会按消息顺序 `await`。`require('testhub-runner')` 通过模块解析别名指向本文件，无需安装。`pong.version` 为 `node-1.0`。
+- Python（`runners/python/testhub_runner.py`）：`@step("文本 <参数>")`、`@before_scenario` 等装饰器、`DataTable`、`Messages.write()`、`SkipStep`、`data_store.{suite,spec,scenario}` 与 `ExecutionContext`。`step_impl/api_steps.py` 用 `TESTHUB_URL` 调本进程 API，供 `selfcheck.spec` 自举。
+- Node.js（`runners/node/testhub_runner.js`，零 npm 依赖）：`step('文本 <参数>', fn)`、`beforeScenario(fn)` 等、同样的 `DataTable` / `Messages` / `SkipStep` / `dataStore`；步骤函数可以是 `async`，Runner 会按消息顺序 `await`。`require('testhub-runner')` 通过模块解析别名指向本文件，无需安装。`pong.version` 为 `node-1.0`。`step_impl/api_steps.js` 与 Python 版对应。
 
 ## 6. 配置
 
@@ -386,7 +387,7 @@ cmake/EmbedResources.cmake
 ## 8. 质量保障
 
 - **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405、请求过滤器；鉴权策略（读/写、凭据来源、常量时间比较）；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话、**parallel_streams 场景重叠且结果保序**）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）；报表（JUnit 结构与计数、转义、空结果、HTML 自包含）；规范目录监控；Runner 池（注入假 Runner：并行分配与会话绑定、阻塞等待、逐槽重启与预算、健康槽位优先、并发安全收缩、停止/重启生命周期、**reserveSlots 原子预约**）。
-- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）、Bearer Token（写保护与全保护两种模式、WebSocket 查询参数）、WebSocket 秒连秒断压力回归、目录监控端到端、**真实 Python Runner 池**（两个进程并行执行两个 0.8 s 的测试总耗时 < 1.5 s；`kill -9` 其中一个进程后按需自愈且孤儿进程组被清理；手动重启替换全部进程；无 `python3` 时跳过）、**真实 Node.js Runner**（同一套 login/calculator/checkout 规范全部通过；断言失败带回 `AssertionError` 堆栈；未实现步骤报 error；无 `node` 时跳过）、**parallel_streams**（单个测试的两个 0.8 s 场景拆到两个 Python 进程，总耗时 < 1.5 s，结果顺序与规范一致）。
+- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）、Bearer Token（写保护与全保护两种模式、WebSocket 查询参数）、WebSocket 秒连秒断压力回归、目录监控端到端、**真实 Python Runner 池**（两个进程并行执行两个 0.8 s 的测试总耗时 < 1.5 s；`kill -9` 其中一个进程后按需自愈且孤儿进程组被清理；手动重启替换全部进程；无 `python3` 时跳过）、**真实 Node.js Runner**（同一套 login/calculator/checkout 规范全部通过；断言失败带回 `AssertionError` 堆栈；未实现步骤报 error；无 `node` 时跳过）、**parallel_streams**（单个测试的两个 0.8 s 场景拆到两个 Python 进程，总耗时 < 1.5 s，结果顺序与规范一致）、**自举**（`selfcheck.spec` 经 Python / Node 调用本进程 HTTP API，并断言入队的 `calculator.spec` 子测试随后通过）。
 - **并发正确性**：所有线程句柄的赋值与检查共享同一把锁（WebSocket 读线程见 `Connection::readerMutex`）；停止流程在持锁状态下改标志再 `notify`，避免丢失唤醒；终态记录先落盘再对外可见。排查偶发问题时用 ThreadSanitizer 构建（`-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"`）运行集成测试，当前零告警。
 - **协议测试**：`python_runner_protocol`（子进程启动 Python Runner，验证 ping/get_steps/execute_step/hook/kill 与错误路径）；`node_runner_protocol`（同样覆盖 async 步骤等待、`console.log` 不污染协议通道、缺失实现目录、非法 JSON 不杀死进程）。
 - **CI**：Ubuntu（g++、clang++）与 macOS，`-Wall -Wextra -Wpedantic -Werror`，`ctest`，二进制冒烟（curl），独立运行 Python / Node 协议测试；CI 安装 Python 3.x 与 Node.js 22。

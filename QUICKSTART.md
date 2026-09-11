@@ -58,6 +58,11 @@ node runners/node/test_runner_protocol.js
 curl http://localhost:8080/api/v1/health
 curl -X POST http://localhost:8080/api/v1/tests -H 'Content-Type: application/json' -d '{"spec_files":["calculator.spec"]}'
 curl http://localhost:8080/api/v1/tests?limit=5
+
+# 自举：用 .spec 经 HTTP API 验证本进程（需要 python/node Runner，不要用 mock）
+curl -X POST http://localhost:8080/api/v1/tests \
+  -H 'Content-Type: application/json' \
+  -d '{"spec_files":["selfcheck.spec"]}'
 ```
 
 浏览器打开 <http://localhost:8080/>。

@@ -5,7 +5,7 @@
 ## 当前状态（v1.1.0）
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
-- 113 个自动化测试全部通过（77 单元 + 17 集成 + 7 Python 协议 + 12 Node.js 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
+- 114 个自动化测试全部通过（77 单元 + 18 集成 + 7 Python 协议 + 12 Node.js 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
 - 约 15k 行（含前端、Python / Node.js Runner、测试）
 
 ## 路线图
@@ -30,7 +30,7 @@
 - [x] 鉴权：`server.auth_token` Bearer Token（写操作 / 可选全保护），UI token 输入与 401 处理
 - [x] 规范目录监控：轮询快照，外部变更自动重载概念并推送 `specs.reloaded`，UI 实时刷新
 - [x] Runner 池：每个并发测试独占一个 Runner 进程真正并行，逐槽自愈，UI 展示每个进程
-- [x] 测试内并行：`parallel_streams` 把单个测试的场景拆到池中多个进程（每流独立 suite/spec 钩子）
+- [x] 自举验证：绑定端口后注入 `TESTHUB_URL` / `TESTHUB_TOKEN`；`specs/selfcheck.spec` 经 Python / Node 步骤实现调用本进程 HTTP API（健康、状态 URL、Runner 在线、规范列表、提交子测试）；步骤不轮询子测试以免 `-j 1` 死锁
 
 ### P2 — 增强
 
@@ -176,6 +176,13 @@
 - UI：提交表单增加“并行流”，详情页展示；事件带 `stream`
 - 测试：2 个引擎单测（两个 400 ms 场景 403 ms 完成且顺序为甲/乙；streams=1 回归）+ `reserveSlots` 单测 + 1 个真实 Python 集成测试（单 worker、池大小 2、一个测试的两个 0.8 s 场景 903 ms 完成）
 
+### 迭代 17 — 自举验证
+
+- `TestHub::start()` 先绑定 HTTP 端口，再把 `TESTHUB_URL`（`public_base_url` 或 `http://127.0.0.1:<boundPort>`）和可选 `TESTHUB_TOKEN` 写入 `execution.environment` 与 Runner 子进程环境，然后才启动 Runner。`GET /status` 与 `server.started` 携带 `url`
+- `specs/selfcheck.spec` + `runners/*/step_impl/api_steps.*`：用本进程 HTTP API 检查健康、状态 URL、规范列表、Runner 在线、以及存在运行中的测试；再 POST 提交 `calculator.spec`（只断言 202，不在步骤里 `wait`，避免 `-j 1` 死锁）
+- 自举运行时当前槽位为 `busy` 而非空闲时的 `connected`，步骤「Runner 应在线」同时接受这两种可用状态
+- 测试：规范解析覆盖自举文件的引号参数；Python 集成测试跑完整 selfcheck + 子测试；Node 端到端用例末尾同样跑一遍
+
 ---
 
 ## 决策记录
@@ -197,6 +204,7 @@
 | 迭代 14 | 进程存活检查按需进行（分配时），不加心跳线程 | 每次分配/每步执行前都会 `waitpid(WNOHANG)`，成本可忽略；崩溃的进程在下次使用时重启，UI 报告"will be restarted on next use"；额外的心跳线程只会更早发现但不会更早需要它 |
 | 迭代 15 | Node.js Runner 用 CommonJS + 模块解析别名，不引入 npm 包 | 保持仓库零第三方依赖；`require('testhub-runner')` 解析到捆绑脚本即可；async/await 是 Node 自带能力，用来验证协议对异步步骤的等待语义 |
 | 迭代 16 | 并行流采用“凑齐 N 个槽位再开工”，不降级为更少的流 | 降级会让同一测试的 suite 钩子只跑在部分进程上，语义随池占用情况漂移；排队等齐更可预期。数据驱动的每一行当作独立场景分片 |
+| 迭代 17 | 自举步骤不轮询子测试；Runner「应在线」接受 connected/busy | 步骤里 `wait` 子测试会在 `-j 1` 时占满唯一 worker 造成死锁；自举过程中当前槽位必然是 busy，断言 connected 会假失败 |
 
 ---
 
@@ -205,7 +213,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 113 个，全部通过（77 单元 + 17 集成 + 7 Python 协议 + 12 Node 协议）；`ctest` 约 7 s；TSan 零告警 |
+| 自动化测试 | 114 个，全部通过（77 单元 + 18 集成 + 7 Python 协议 + 12 Node 协议）；`ctest` 约 7 s；TSan 零告警 |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
 | 代码规模 | 约 14k 行（C++ 约 10.2k，前端约 1.2k，Python 约 0.7k，测试约 2.4k） |
