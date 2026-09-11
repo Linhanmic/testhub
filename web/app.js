@@ -1591,8 +1591,8 @@
       const n = catalog.filter((x) => x.kind === 'step').length;
       const c = catalog.filter((x) => x.kind === 'concept').length;
       hint.textContent = n
-        ? `可补全 ${n} 个 Runner 步骤${c ? `、${c} 个概念` : ''}。在 * 行输入，或 Ctrl+Space /「步骤补全」。`
-        : (c ? `当前 Runner 未报告步骤；可补全 ${c} 个概念。在 * 行输入或 Ctrl+Space。` : '当前没有可补全的步骤（mock Runner 不报告实现列表）。');
+        ? t('可补全 {n} 个 Runner 步骤{concepts}。在 * 行输入，或 Ctrl+Space /「步骤补全」。', { n, concepts: c ? t('、{n} 个概念', { n: c }) : '' })
+        : (c ? t('当前 Runner 未报告步骤；可补全 {n} 个概念。在 * 行输入或 Ctrl+Space。', { n: c }) : t('当前没有可补全的步骤（mock Runner 不报告实现列表）。'));
     }
     return { open: () => show(true) };
   }
@@ -1600,47 +1600,46 @@
     if (file) return specDetail(main, file);
     const data = await api('/specs');
     const concepts = await api('/concepts');
-    main.innerHTML = `${header('规范文件', `<code>${esc(data.specs_dir)}</code>${data.current_project ? ` · 项目 <b>${esc(data.current_project)}</b>` : ''} · ${data.count} 个规范 · ${data.total_scenarios} 个场景 · ${concepts.count} 个概念`,
-      `<button class="btn" id="reload-specs">↻ 重新加载</button><button class="btn" id="validate-all">校验全部</button><button class="btn primary" id="new-spec">＋ 新建规范</button>`)}
+    main.innerHTML = `${header('规范文件', `<code>${esc(data.specs_dir)}</code>${data.current_project ? t(' · 项目 <b>{id}</b>', { id: esc(data.current_project) }) : ''} · ${t('{n} 个规范', { n: data.count })} · ${t('{n} 个场景', { n: data.total_scenarios })} · ${t('{n} 个概念', { n: concepts.count })}`,
+      `<button class="btn" id="reload-specs">${t('↻ 重新加载')}</button><button class="btn" id="validate-all">${t('校验全部')}</button><button class="btn primary" id="new-spec">${t('＋ 新建规范')}</button>`)}
       <div id="validate-out"></div>
       <div class="card"><div class="table-wrap">${data.specs.length ? `<table><thead><tr><th>文件</th><th>标题</th><th>标签</th><th>场景</th><th>状态</th><th></th></tr></thead><tbody>
         ${data.specs.map((s) => `<tr class="clickable" onclick="location.hash='#/specs/${encodeURIComponent(s.file)}'">
           <td class="mono">${esc(s.file)}</td><td>${esc(s.heading || '-')}</td><td>${tags(s.tags)}</td>
-          <td class="num">${s.scenario_count}${s.is_data_driven ? ' <span class="tag">数据驱动</span>' : ''}</td>
-          <td>${s.valid ? '<span class="pill passed">有效</span>' : `<span class="pill failed" title="${esc(s.errors.map(fmtIssue).join('\n'))}">${s.errors.length} 个错误</span>`}</td>
-          <td class="right nowrap" onclick="event.stopPropagation()"><a class="btn sm primary" href="#/run/${encodeURIComponent(s.file)}" ${s.valid ? '' : 'style="pointer-events:none;opacity:.5"'}>▶ 运行</a></td>
-        </tr>`).join('')}</tbody></table>` : '<div class="empty">规范目录为空。点击“新建规范”开始。</div>'}</div></div>
+          <td class="num">${s.scenario_count}${s.is_data_driven ? ` <span class="tag">${t('数据驱动')}</span>` : ''}</td>
+          <td>${s.valid ? `<span class="pill passed">${t('有效')}</span>` : `<span class="pill failed" title="${esc(s.errors.map(fmtIssue).join('\n'))}">${t('{n} 个错误', { n: s.errors.length })}</span>`}</td>
+          <td class="right nowrap" onclick="event.stopPropagation()"><a class="btn sm primary" href="#/run/${encodeURIComponent(s.file)}" ${s.valid ? '' : 'style="pointer-events:none;opacity:.5"'}>▶ ${t('运行')}</a></td>
+        </tr>`).join('')}</tbody></table>` : `<div class="empty">${t('规范目录为空。点击“新建规范”开始。')}</div>`}</div></div>
       ${concepts.count ? `<div class="card mt"><div class="card-header"><h2>概念（.cpt）</h2></div><div class="table-wrap"><table><thead><tr><th>概念</th><th>参数</th><th>步骤数</th><th>文件</th></tr></thead><tbody>
         ${concepts.concepts.map((c) => `<tr><td class="mono">${highlightStep(c.heading)}</td><td>${tags(c.params)}</td><td class="num">${c.steps.length}</td><td class="mono muted">${esc(c.file)}:${c.line_number}</td></tr>`).join('')}</tbody></table></div></div>` : ''}`;
-    $('#reload-specs').onclick = async () => { const r = await api('/specs/reload', { method: 'POST' }); toast(`已重新加载：${r.specs} 规范，${r.concepts} 概念`, 'ok'); navigate(); };
+    $('#reload-specs').onclick = async () => { const r = await api('/specs/reload', { method: 'POST' }); toast(t('已重新加载：{specs} 规范，{concepts} 概念', { specs: r.specs, concepts: r.concepts }), 'ok'); navigate(); };
     $('#validate-all').onclick = async () => {
       const r = await api('/specs/validate', { method: 'POST', body: {} });
       const bad = r.results.filter((x) => !x.valid);
       $('#validate-out').innerHTML = bad.length
-        ? `<div class="alert error"><b>${bad.length} 个文件存在错误</b><ul style="margin:6px 0 0;padding-left:18px">${bad.map((x) => x.errors.map((e) => `<li><span class="mono">${esc(x.file)}:${e.line}</span> ${esc(e.message)}</li>`).join('')).join('')}</ul></div>`
-        : `<div class="alert ok">全部 ${r.results.length} 个文件校验通过</div>`;
+        ? `<div class="alert error"><b>${t('{n} 个文件存在错误', { n: bad.length })}</b><ul style="margin:6px 0 0;padding-left:18px">${bad.map((x) => x.errors.map((e) => `<li><span class="mono">${esc(x.file)}:${e.line}</span> ${esc(e.message)}</li>`).join('')).join('')}</ul></div>`
+        : `<div class="alert ok">${t('全部 {n} 个文件校验通过', { n: r.results.length })}</div>`;
     };
     $('#new-spec').onclick = async () => {
-      const name = prompt('新规范文件名（相对规范目录，例如 checkout/payment.spec）', 'new-feature.spec');
+      const name = prompt(t('新规范文件名（相对规范目录，例如 checkout/payment.spec）'), 'new-feature.spec');
       if (!name) return;
       const template = `# ${name.replace(/\.(spec|md)$/, '').split('/').pop()}\n\ntags: draft\n\n## 第一个场景\n\n* 第一步 "参数"\n* 第二步\n`;
-      try { await api(`/specs/${name.split('/').map(encodeURIComponent).join('/')}`, { method: 'PUT', body: { content: template } }); toast('已创建', 'ok'); location.hash = `#/specs/${encodeURIComponent(name)}`; }
+      try { await api(`/specs/${name.split('/').map(encodeURIComponent).join('/')}`, { method: 'PUT', body: { content: template } }); toast(t('已创建'), 'ok'); location.hash = `#/specs/${encodeURIComponent(name)}`; }
       catch (e) { toast(e.message, 'error'); }
     };
-    // 目录被外部工具（编辑器、git）修改时由监控器推送 specs.reloaded：提示并刷新列表
-    let t = null;
+    let reloadTimer = null;
     const off = live.on((ev) => {
       if (ev.event !== 'specs.reloaded' || !ev.data || ev.data.source !== 'watcher') return;
       const d = ev.data;
       const parts = [];
-      if (+d.created) parts.push(`新增 ${d.created}`);
-      if (+d.updated) parts.push(`修改 ${d.updated}`);
-      if (+d.deleted) parts.push(`删除 ${d.deleted}`);
-      toast(`规范目录已变化：${parts.join('，') || '已重载'}${d.concepts_reloaded ? '（概念已重载）' : ''}`, 'info');
-      clearTimeout(t);
-      t = setTimeout(navigate, 300);
+      if (+d.created) parts.push(t('新增 {n}', { n: d.created }));
+      if (+d.updated) parts.push(t('修改 {n}', { n: d.updated }));
+      if (+d.deleted) parts.push(t('删除 {n}', { n: d.deleted }));
+      toast(t('规范目录已变化：{parts}', { parts: parts.join('，') || t('已重载') }) + (d.concepts_reloaded ? t('（概念已重载）') : ''), 'info');
+      clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(navigate, 300);
     });
-    return () => { off(); clearTimeout(t); };
+    return () => { off(); clearTimeout(reloadTimer); };
   };
   async function specDetail(main, file) {
     const enc = file.split('/').map(encodeURIComponent).join('/');

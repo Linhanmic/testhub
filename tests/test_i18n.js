@@ -24,6 +24,8 @@ assert.strictEqual(i18n.t('已关闭'), 'Off');
 assert.strictEqual(i18n.t('参数'), 'Params');
 assert.strictEqual(i18n.t('{n} 场景', { n: 3 }), '3 scenarios');
 assert.ok(i18n.t('规范目录：<code>{dir}</code> · {files} 个文件 · {scenarios} 个场景', { dir: '/s', files: 6, scenarios: 15 }).includes('6 files'));
+assert.strictEqual(i18n.t('{n} 个规范', { n: 6 }), '6 specs');
+assert.strictEqual(i18n.t('↻ 重新加载'), '↻ Reload');
 assert.strictEqual(i18n.locale(), 'en');
 assert.strictEqual(i18n.t('__missing_key__'), '__missing_key__');
 
