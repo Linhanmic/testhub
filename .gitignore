@@ -34,5 +34,12 @@ node_modules/
 /*.png
 /*.mp4
 
+# 覆盖率
+*.gcda
+*.gcno
+*.gcov
+coverage.info
+coverage.xml
+
 # 运行时数据（结果持久化）
 data/

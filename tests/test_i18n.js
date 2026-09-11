@@ -1,0 +1,28 @@
+#!/usr/bin/env node
+'use strict';
+const assert = require('assert');
+const i18n = require('../web/i18n.js');
+
+assert.ok(i18n.en, 'en catalog');
+const n = Object.keys(i18n.en).length;
+assert.ok(n >= 80, 'catalog too small: ' + n);
+
+i18n.setLang('zh');
+assert.strictEqual(i18n.t('总览'), '总览');
+assert.strictEqual(i18n.t('{n} 秒前', { n: 3 }), '3 秒前');
+assert.strictEqual(i18n.locale(), 'zh-CN');
+
+i18n.setLang('en');
+assert.strictEqual(i18n.t('总览'), 'Overview');
+assert.strictEqual(i18n.t('提交测试'), 'Submit test');
+assert.strictEqual(i18n.t('{n} 秒前', { n: 3 }), '3s ago');
+assert.strictEqual(i18n.t('已完成 {n} 次', { n: 7 }), '7 finished');
+assert.strictEqual(i18n.t('{n} 送达', { n: 0 }), '0 delivered');
+assert.strictEqual(i18n.t('{on}/{total} 已启用', { on: 0, total: 0 }), '0/0 enabled');
+assert.strictEqual(i18n.t('详情 →'), 'Details →');
+assert.strictEqual(i18n.t('已关闭'), 'Off');
+assert.strictEqual(i18n.t('参数'), 'Params');
+assert.strictEqual(i18n.locale(), 'en');
+assert.strictEqual(i18n.t('__missing_key__'), '__missing_key__');
+
+console.log('i18n ok:', n, 'keys; en 总览 =', i18n.t('总览'));

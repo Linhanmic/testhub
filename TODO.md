@@ -6,7 +6,7 @@
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
 - 约 15k 行（含前端、Python / Node.js Runner、测试）
-- 137 个自动化测试全部通过（96 单元 + 22 集成 + 7 Python 协议 + 12 Node.js 协议），GitHub Actions（Linux / macOS / Windows / Docker）；ThreadSanitizer 零告警
+- 自动化测试：单元 + 集成 + Python / Node 协议 + UI i18n + HTTP 压力；GitHub Actions（Linux / macOS / Windows / Docker / clang-tidy / gcov）；ThreadSanitizer 零告警
 
 ## 路线图
 
@@ -44,10 +44,10 @@
 
 ### P3 — 工程质量
 
-- [ ] 压力测试脚本（并发连接、大结果树、长时间运行内存曲线）
-- [ ] 覆盖率统计（gcov/llvm-cov）接入 CI
-- [ ] 静态分析（clang-tidy）配置
-- [ ] i18n：UI 文案抽离，提供英文界面
+- [x] 压力测试脚本（并发连接、大结果树、长时间运行内存曲线）
+- [x] 覆盖率统计（gcov/llvm-cov）接入 CI
+- [x] 静态分析（clang-tidy）配置
+- [x] i18n：UI 文案抽离，提供英文界面
 
 ---
 
@@ -243,6 +243,19 @@
 - CI 增加 `windows-latest` 与 `docker build` + `login.spec` 冒烟；Linux 上 `--service install` 退出 2
 - 测试：`defaultCommandForLanguage` 启动器前缀 1 单元。合计 137（96+22+7+12）
 
+### 迭代 25 — MSVC / 项目切换竞态
+
+- `StringUtil::toLower`/`toUpper` 用 `unsigned char`，消除 MSVC `/WX` 下 `std::transform(::tolower)` 的 C4244
+- `stats()` 按记录统计 QUEUED/RUNNING；`hasActiveTests()` 覆盖出队后、标 RUNNING 前的窗口，切换项目返回 409
+- 测试：引擎 queued 计数 1 单元；集成 409 前断言 stats 忙碌
+
+### 迭代 26 — P3 工程质量
+
+- `scripts/stress.py`：并发 GET、2500 场景校验、提交 login.spec、采样 `/proc/pid` RSS；`ctest` 注册 `http_stress`
+- `.clang-tidy` + CI job；`TESTHUB_ENABLE_COVERAGE` + `scripts/coverage.sh` + CI 行覆盖率门槛 50%
+- UI i18n：`web/i18n.js` 中文为键、英文对照；侧栏原生 `<select>` 切换；`document.documentElement.lang`；`localizePage` 翻译精确匹配的标签。仪表盘服务摘要（规范监控 / 计划 / 回调）与插值字符串走 `t()`。规范正文与步骤名不翻译
+- `tests/test_i18n.js` 校验目录与插值
+
 ---
 
 ## 决策记录
@@ -270,6 +283,8 @@
 | 迭代 22 | 编辑器高亮用叠加层而非 contenteditable；补全同时收录 Runner 步骤与概念 | contenteditable 难与原生撤销/选区/读屏共存；mock 不报告步骤时概念仍能补全 |
 | 迭代 23 | 项目只切换规范/概念目录，Runner 保持全局 | 「多套用例、同一套步骤实现」是主场景；换 Runner 要重启进程池且不能与运行中的测试并存，留给以后按项目覆盖 runner 字段 |
 | 迭代 24 | Windows 服务进 testhub.exe 而不是依赖 NSSM；Docker 用多阶段非 root | 零第三方服务包装器；SCM 能真正 STOP。镜像不跑测试、不含源码，减小攻击面 |
+| 迭代 25 | 忙碌判定以记录状态为准，而不是队列长度 | 出队后解析规范、预约 Runner 槽期间状态仍是 QUEUED，queue.size() 已为 0 |
+| 迭代 26 | UI 文案以中文为键、运行时替换；不翻译规范/步骤正文 | 避免把用例文本误译；侧栏语言选择符合「英文界面」而不引入构建步骤 |
 
 ---
 
@@ -278,7 +293,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 137 个，全部通过（96 单元 + 22 集成 + 7 Python 协议 + 12 Node 协议）；`ctest` 约 7 s；TSan 零告警 |
+| 自动化测试 | 97 单元 + 22 集成 + 7 Python + 12 Node + i18n + HTTP 压力；`ctest`；TSan 零告警 |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
-| 代码规模 | 约 14k 行（C++ 约 10.2k，前端约 1.2k，Python 约 0.7k，测试约 2.4k） |
+| 代码规模 | 约 15k 行（C++ 约 10.2k，前端约 1.4k，Python 约 0.7k，测试约 2.5k） |

@@ -72,6 +72,40 @@ jobs:
       - name: Node runner protocol (standalone)
         run: node runners/node/test_runner_protocol.js
 
+  clang-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-tidy
+        run: sudo apt-get update && sudo apt-get install -y clang-tidy
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++ -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DTESTHUB_BUILD_TESTS=OFF
+      - name: Run clang-tidy
+        run: |
+          GCC_DIR="$(g++ -print-search-dirs | awk -F: '/install:/ {gsub(/ /,"",$2); print $2; exit}')"
+          mapfile -t SRC < <(find src -name '*.cpp' ! -name 'win_service.cpp' | sort)
+          clang-tidy -p build --extra-arg=--gcc-install-dir="${GCC_DIR}" "${SRC[@]}"
+
+  coverage:
+    name: coverage (gcov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install gcovr
+        run: pip install gcovr
+      - name: Coverage
+        run: |
+          chmod +x scripts/coverage.sh
+          ./scripts/coverage.sh
+          gcovr -r . build-cov --exclude '.*/tests/.*' --exclude '.*/generated/.*' --fail-under-line 50
+
   windows:
     name: windows / msvc
     runs-on: windows-latest

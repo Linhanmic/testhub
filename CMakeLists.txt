@@ -11,6 +11,8 @@ endif()
 
 option(TESTHUB_BUILD_TESTS "Build unit and integration tests" ON)
 option(TESTHUB_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+option(TESTHUB_ENABLE_COVERAGE "Instrument binaries with gcov (--coverage)" OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Threads REQUIRED)
 
@@ -28,6 +30,15 @@ else()
     target_compile_options(testhub_options INTERFACE -Wall -Wextra -Wpedantic)
     if(TESTHUB_WARNINGS_AS_ERRORS)
         target_compile_options(testhub_options INTERFACE -Werror)
+    endif()
+endif()
+
+if(TESTHUB_ENABLE_COVERAGE)
+    if(MSVC)
+        message(WARNING "TESTHUB_ENABLE_COVERAGE is ignored on MSVC; use GCC or Clang")
+    else()
+        target_compile_options(testhub_options INTERFACE --coverage -O0 -g)
+        target_link_options(testhub_options INTERFACE --coverage)
     endif()
 endif()
 

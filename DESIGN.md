@@ -234,7 +234,7 @@ class Runner {                      // 抽象接口
 | `#/runner` | Runner 状态、已实现步骤、重启 |
 | `#/events` | 全量事件流，按类型/测试 ID 过滤，可隐藏 step.*，可暂停与导出 JSON |
 
-构建时 `cmake/EmbedResources.cmake` 把 `web/*` 编译进 `web_assets.cpp`；`--web-dir` 允许从磁盘热改。页面切换时替换 `#main` 节点以丢弃旧监听器，避免重复请求。
+构建时 `cmake/EmbedResources.cmake` 把 `web/*` 编译进 `web_assets.cpp`；`--web-dir` 允许从磁盘热改。页面切换时替换 `#main` 节点以丢弃旧监听器，避免重复请求。侧栏语言选择（`web/i18n.js`）把界面切到英文；规范正文与步骤名不翻译。`document.documentElement.lang` 随语言更新。
 
 ## 4. 数据模型（`src/model/types.h`）
 

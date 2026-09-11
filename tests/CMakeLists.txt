@@ -47,4 +47,18 @@ if(NODE_EXECUTABLE)
         COMMAND "${NODE_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/runners/node/test_runner_protocol.js"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/runners/node")
     set_tests_properties(node_runner_protocol PROPERTIES TIMEOUT 60)
+    add_test(NAME ui_i18n
+        COMMAND "${NODE_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/test_i18n.js"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+endif()
+
+if(PYTHON3_EXECUTABLE AND NOT WIN32)
+    add_test(NAME http_stress
+        COMMAND "${PYTHON3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/stress.py"
+                --binary "$<TARGET_FILE:testhub>"
+                --specs "${CMAKE_SOURCE_DIR}/specs"
+                --connections 16
+                --scenarios 800
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    set_tests_properties(http_stress PROPERTIES TIMEOUT 90)
 endif()

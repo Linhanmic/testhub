@@ -28,6 +28,8 @@ ctest --test-dir build --output-on-failure             # 运行全部测试
 | `CMAKE_CXX_COMPILER` | 系统默认 | 若默认 `c++` 不可用可指定 `g++` / `clang++` |
 | `TESTHUB_BUILD_TESTS` | ON | 是否构建 `tests/` |
 | `TESTHUB_WARNINGS_AS_ERRORS` | OFF | CI 中开启，`-Wall -Wextra -Wpedantic -Werror` |
+| `TESTHUB_ENABLE_COVERAGE` | OFF | GCC/Clang `--coverage`；见 `scripts/coverage.sh` |
+| `CMAKE_EXPORT_COMPILE_COMMANDS` | ON | 供 clang-tidy 使用 |
 
 测试目标：
 
@@ -35,6 +37,8 @@ ctest --test-dir build --output-on-failure             # 运行全部测试
 - `testhub_integration_tests` — 启动真实服务器（端口 0），用原生 TCP 客户端验证 REST、流水线、并发、WebSocket 事件流、规范 CRUD、取消
 - `python_runner_protocol` — 以子进程方式启动 Python Runner，验证 JSON-lines 协议
 - `node_runner_protocol` — 以子进程方式启动 Node.js Runner，验证同一协议（含 async 步骤）
+- `ui_i18n` — 中英文字典键与插值
+- `http_stress` — 并发 HTTP、大规范校验、RSS 采样（POSIX）
 
 ```bash
 ./build/tests/testhub_unit_tests --filter "spec:"      # 只跑名称包含 spec: 的用例
@@ -219,9 +223,12 @@ Windows：`packaging/windows/package.ps1` 暂存 `testhub.exe` + specs/runners�
 
 ```bash
 cmake --build build -j && ctest --test-dir build
-node --check web/app.js
+node --check web/app.js web/i18n.js
 python3 runners/python/test_runner_protocol.py
 node runners/node/test_runner_protocol.js
+python3 scripts/stress.py --binary ./build/testhub   # 并发 HTTP + 大规范 + RSS
+# 覆盖率（需 GCC）：./scripts/coverage.sh
+# 静态分析：cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON && clang-tidy -p build src/**/*.cpp
 ```
 
-CI（`.github/workflows/ci.yml`）会在 Linux（g++ / clang++）和 macOS 上以 `-Werror` 构建并运行上述全部测试。
+CI（`.github/workflows/ci.yml`）会在 Linux（g++ / clang++）、macOS、Windows MSVC 上以 `-Werror` 构建并运行测试，另有 Docker 冒烟、clang-tidy 与 gcov 覆盖率（行覆盖率门槛 50%）。

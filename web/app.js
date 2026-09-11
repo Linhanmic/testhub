@@ -2,6 +2,9 @@
 (function () {
   'use strict';
 
+  const i18n = window.TestHubI18n;
+  const t = (zh, vars) => i18n.t(zh, vars);
+
   // ------------------------------------------------------------
   // 工具
   // ------------------------------------------------------------
@@ -19,24 +22,24 @@
     if (!iso) return '-';
     const d = new Date(iso);
     if (isNaN(d)) return iso;
-    return d.toLocaleString(undefined, { hour12: false });
+    return d.toLocaleString(i18n.locale(), { hour12: false });
   };
   const fmtClock = (iso) => {
     const d = new Date(iso);
-    return isNaN(d) ? '' : d.toLocaleTimeString(undefined, { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+    return isNaN(d) ? '' : d.toLocaleTimeString(i18n.locale(), { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
   };
   const rel = (iso) => {
     if (!iso) return '-';
     const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-    if (diff < 60) return `${Math.max(0, Math.round(diff))} 秒前`;
-    if (diff < 3600) return `${Math.round(diff / 60)} 分钟前`;
-    if (diff < 86400) return `${Math.round(diff / 3600)} 小时前`;
-    return `${Math.round(diff / 86400)} 天前`;
+    if (diff < 60) return t('{n} 秒前', { n: Math.max(0, Math.round(diff)) });
+    if (diff < 3600) return t('{n} 分钟前', { n: Math.round(diff / 60) });
+    if (diff < 86400) return t('{n} 小时前', { n: Math.round(diff / 3600) });
+    return t('{n} 天前', { n: Math.round(diff / 86400) });
   };
   const STATE_LABEL = { queued: '排队中', running: '运行中', passed: '通过', failed: '失败', skipped: '跳过', cancelled: '已取消', error: '错误',
     connected: '已连接', disconnected: '未连接', connecting: '连接中', busy: '执行中' };
   const CHANGE_LABEL = { regressed: '回归', improved: '改善', still_failed: '仍失败', unchanged: '未变', added: '新增', removed: '移除' };
-  const pill = (state) => `<span class="pill ${esc(state)}">${esc(STATE_LABEL[state] || CHANGE_LABEL[state] || state)}</span>`;
+  const pill = (state) => `<span class="pill ${esc(state)}">${esc(t(STATE_LABEL[state] || CHANGE_LABEL[state] || state))}</span>`;
   const pct = (rate) => `${Math.round((Number(rate) || 0) * 100)}%`;
   const fmtIssue = (e) => (e.line > 0 ? `L${e.line}: ` : '') + e.message;
   const tags = (arr) => (arr || []).map((t) => `<span class="tag">${esc(t)}</span>`).join('') || '<span class="muted">-</span>';
@@ -61,10 +64,10 @@
     render() {
       const el = $('#auth-btn'); if (!el) return;
       let cls = '', text;
-      if (!this.required) text = '鉴权：未启用';
-      else if (this.invalid) { cls = 'invalid'; text = '鉴权：token 无效'; }
-      else if (this.token) { cls = 'ok'; text = this.protectReads ? '鉴权：已登录（全部接口）' : '鉴权：已登录（写操作）'; }
-      else { cls = 'missing'; text = '鉴权：需要 token'; }
+      if (!this.required) text = t('鉴权：未启用');
+      else if (this.invalid) { cls = 'invalid'; text = t('鉴权：token 无效'); }
+      else if (this.token) { cls = 'ok'; text = this.protectReads ? t('鉴权：已登录（全部接口）') : t('鉴权：已登录（写操作）'); }
+      else { cls = 'missing'; text = t('鉴权：需要 token'); }
       el.className = `auth ${cls}`; $('.auth-text', el).textContent = text;
     },
     async prompt(message) {
@@ -77,11 +80,15 @@
           dlg.innerHTML = `<div class="card-header"><h2>API Token</h2></div>
             <form class="card-body form" id="auth-form">
               ${message ? `<div class="alert warn">${esc(message)}</div>` : ''}
-              <div class="small muted">服务器${this.required ? '已启用' : '未启用'} Bearer Token 鉴权${this.required ? (this.protectReads ? '（所有接口与实时连接）' : '（写操作：提交、取消、删除、编辑规范）') : ''}。token 只保存在当前浏览器的 localStorage 中。</div>
-              <label class="field">Token<input type="password" id="auth-input" value="${esc(this.token)}" placeholder="与 --auth-token / TESTHUB_AUTH_TOKEN 一致" autocomplete="off"></label>
+              <div class="small muted">${this.required
+                ? (this.protectReads
+                  ? t('服务器已启用 Bearer Token 鉴权（所有接口与实时连接）。token 只保存在当前浏览器的 localStorage 中。')
+                  : t('服务器已启用 Bearer Token 鉴权（写操作：提交、取消、删除、编辑规范）。token 只保存在当前浏览器的 localStorage 中。'))
+                : t('服务器未启用 Bearer Token 鉴权。token 只保存在当前浏览器的 localStorage 中。')}</div>
+              <label class="field">Token<input type="password" id="auth-input" value="${esc(this.token)}" placeholder="${esc(t('与 --auth-token / TESTHUB_AUTH_TOKEN 一致'))}" autocomplete="off"></label>
               <div class="flex" style="justify-content:space-between">
-                <button class="btn" data-x="clear" type="button">清除</button>
-                <span class="btn-group"><button class="btn" data-x="cancel" type="button">取消</button><button class="btn primary" data-x="save" type="submit">保存</button></span>
+                <button class="btn" data-x="clear" type="button">${t('清除')}</button>
+                <span class="btn-group"><button class="btn" data-x="cancel" type="button">${t('取消')}</button><button class="btn primary" data-x="save" type="submit">${t('保存')}</button></span>
               </div>
             </form>`;
           document.body.appendChild(dlg);
@@ -117,7 +124,7 @@
         auth.required = true;
         auth.invalid = !!auth.token;
         auth.render();
-        auth.prompt(auth.token ? 'token 被服务器拒绝，请重新输入。' : '该操作需要 API Token。').then((saved) => { if (saved) { if (auth.protectReads) live.reconnect(); navigate(); } });
+        auth.prompt(auth.token ? t('token 被服务器拒绝，请重新输入。') : t('该操作需要 API Token。')).then((saved) => { if (saved) { if (auth.protectReads) live.reconnect(); navigate(); } });
       }
       throw err;
     }
@@ -138,7 +145,7 @@
       dlg.className = 'modal';
       dlg.innerHTML = `<div class="card-header"><h2>${esc(title)}</h2></div>
         <div class="card-body"><div>${esc(body)}</div>
-        <div class="flex" style="justify-content:flex-end"><button class="btn" data-x="0">取消</button><button class="btn danger" data-x="1">确认</button></div></div>`;
+        <div class="flex" style="justify-content:flex-end"><button class="btn" data-x="0">${t('取消')}</button><button class="btn danger" data-x="1">${t('确认')}</button></div></div>`;
       document.body.appendChild(dlg);
       dlg.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { dlg.close(); resolve(b.dataset.x === '1'); } });
       dlg.addEventListener('close', () => { dlg.remove(); resolve(false); });
@@ -155,11 +162,11 @@
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${proto}://${location.host}/ws/v1/events${auth.qs()}`);
       this.ws = ws;
-      ws.onopen = () => { this.retry = 0; setConn('online', '实时连接已建立'); };
+      ws.onopen = () => { this.retry = 0; setConn('online', t('实时连接已建立')); };
       ws.onclose = () => {
         if (this.ws !== ws) return;  // 已被 reconnect() 替换
         const needToken = auth.protectReads && !auth.token;
-        setConn('offline', needToken ? '实时连接需要 API Token' : '实时连接断开，重连中…');
+        setConn('offline', needToken ? t('实时连接需要 API Token') : t('实时连接断开，重连中…'));
         const delay = Math.min(15000, 500 * Math.pow(2, this.retry++));
         this.timer = setTimeout(() => this.connect(), needToken ? 15000 : delay);
       };
@@ -209,7 +216,7 @@
         this.data = await api(`/projects/${encodeURIComponent(id)}/select`, { method: 'POST', body: {} });
         this.render();
         const name = ((this.data.projects || []).find((p) => p.id === id) || {}).name || id;
-        toast(`已切换到项目「${name}」`, 'ok');
+        toast(t('已切换到项目「{name}」', { name }), 'ok');
         if (/^#\/specs\/.+/.test(location.hash)) location.hash = '#/specs';
         else navigate();
       } catch (err) {
@@ -230,22 +237,46 @@
     const [name, ...rest] = hash.split('/');
     const page = routes[name] || routes.dashboard;
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === name));
-    document.title = (rest[0] ? decodeURIComponent(rest[0]) : (PAGE_TITLES[name] || name)) + ' · TestHub';
+    document.title = (rest[0] ? decodeURIComponent(rest[0]) : t(PAGE_TITLES[name] || name)) + ' · TestHub';
     if (cleanup) { try { cleanup(); } catch {} cleanup = null; }
     // 用全新节点替换 #main，丢弃上一页面注册的所有事件监听器
     const old = $('#main');
     const main = old.cloneNode(false);
     old.replaceWith(main);
-    main.innerHTML = '<div class="loading">正在加载…</div>';
+    main.innerHTML = `<div class="loading">${t('正在加载…')}</div>`;
     Promise.resolve(page(main, rest.map(decodeURIComponent))).then((c) => {
       if (typeof c === 'function') cleanup = c;
+      localizePage(main);
       main.focus({ preventScroll: true });
-    }).catch((e) => { main.innerHTML = `<div class="alert error">加载失败：${esc(e.message)}</div>`; });
+    }).catch((e) => { main.innerHTML = `<div class="alert error">${t('加载失败：{msg}', { msg: esc(e.message) })}</div>`; });
   }
   window.addEventListener('hashchange', navigate);
 
   function header(title, sub, actions = '') {
-    return `<div class="page-header"><div><h1>${title}</h1>${sub ? `<div class="sub">${sub}</div>` : ''}</div><div class="btn-group">${actions}</div></div>`;
+    const tTitle = /<[a-z]/i.test(title) ? title : t(title);
+    return `<div class="page-header"><div><h1>${tTitle}</h1>${sub ? `<div class="sub">${sub}</div>` : ''}</div><div class="btn-group">${actions}</div></div>`;
+  }
+
+  const SKIP_LOCALIZE = 'pre, code, textarea, .mono, .code-view, .editor, .editor-hl, .tree .text, .node-head b, .param, .brand';
+  function localizePage(root) {
+    if (!root || i18n.lang === 'zh') return;
+    const exact = (s) => {
+      if (s == null) return s;
+      const trimmed = String(s).trim();
+      if (!trimmed || !i18n.en[trimmed]) return s;
+      return String(s).replace(trimmed, t(trimmed));
+    };
+    const skip = (el) => el.closest && el.closest(SKIP_LOCALIZE);
+    root.querySelectorAll('button, a.btn, th, dt, h2, h3, label, .label, .hint, .empty, .section-label, summary, .help, .check, li > span:not(.keys)').forEach((el) => {
+      if (skip(el)) return;
+      if (el.childElementCount === 0) el.textContent = exact(el.textContent);
+    });
+    root.querySelectorAll('[placeholder], [title], [aria-label]').forEach((el) => {
+      if (skip(el)) return;
+      ['placeholder', 'title', 'aria-label'].forEach((a) => {
+        if (el.hasAttribute(a)) el.setAttribute(a, exact(el.getAttribute(a)));
+      });
+    });
   }
 
   // ------------------------------------------------------------
@@ -278,9 +309,9 @@
 
   function treeToolbarHtml(failOnly, query) {
     return `<div class="toolbar" id="tree-toolbar">
-      <label class="grow" for="tree-q"><span class="visually-hidden">搜索结果树</span>
-        <input type="search" id="tree-q" placeholder="搜索场景或步骤…" value="${esc(query)}" autocomplete="off"></label>
-      <label class="check"><input type="checkbox" id="tree-fail" ${failOnly ? 'checked' : ''}> 只看失败</label>
+      <label class="grow" for="tree-q"><span class="visually-hidden">${t('搜索结果树')}</span>
+        <input type="search" id="tree-q" placeholder="${esc(t('搜索场景或步骤…'))}" value="${esc(query)}" autocomplete="off"></label>
+      <label class="check"><input type="checkbox" id="tree-fail" ${failOnly ? 'checked' : ''}> ${t('只看失败')}</label>
       <span class="muted small" id="tree-count"></span>
     </div>`;
   }
@@ -328,7 +359,9 @@
       if (any && (q || failOnly)) spec.classList.add('open');
     });
     const count = $('#tree-count');
-    if (count) count.textContent = (q || failOnly) ? `显示 ${shown} / ${scenarios.length} 个场景` : `${scenarios.length} 个场景`;
+    if (count) count.textContent = (q || failOnly)
+      ? t('显示 {shown} / {total} 个场景', { shown, total: scenarios.length })
+      : t('{n} 个场景', { n: scenarios.length });
   }
 
   function showShortcuts() {
@@ -352,6 +385,7 @@
         <div class="flex" style="justify-content:flex-end"><button class="btn primary" type="button" data-x="close">关闭</button></div>
       </div>`;
     document.body.appendChild(dlg);
+    localizePage(dlg);
     dlg.addEventListener('click', (e) => { if (e.target.closest('[data-x=close]')) dlg.close(); });
     dlg.showModal();
   }
@@ -368,22 +402,27 @@
     const dashSeries = overallSeries(trends);
 
     main.innerHTML = `
-      ${header('总览', `TestHub ${esc(status.version)} · 运行 ${fmtDur(status.uptime_seconds)} · 项目 <b>${esc(status.current_project_name || status.current_project || '默认')}</b> · 规范目录 <code>${esc(status.specs_dir)}</code>`,
-        `<a class="btn primary" href="#/run">▶ 提交测试</a>`)}
+      ${header('总览', t('TestHub {ver} · 运行 {up} · 项目 <b>{project}</b> · 规范目录 <code>{dir}</code>', {
+          ver: esc(status.version),
+          up: fmtDur(status.uptime_seconds),
+          project: esc(status.current_project_name || status.current_project || t('默认')),
+          dir: esc(status.specs_dir),
+        }),
+        `<a class="btn primary" href="#/run">${t('▶ 提交测试')}</a>`)}
       <div class="grid grid-4 mb">
-        <div class="card stat info"><div class="label">排队 / 运行中</div><div class="value" id="st-active">${s.queued}<span class="muted" style="font-size:16px"> / ${s.running}</span></div><div class="hint">当前活跃任务</div></div>
-        <div class="card stat pass"><div class="label">通过</div><div class="value" id="st-passed">${s.passed}</div><div class="hint">已完成 ${s.completed} 次</div></div>
-        <div class="card stat fail"><div class="label">失败 / 错误</div><div class="value" id="st-failed">${s.failed}<span class="muted" style="font-size:16px"> / ${s.errored}</span></div><div class="hint">取消 ${s.cancelled}</div></div>
-        <div class="card stat"><div class="label">场景通过率</div><div class="value" id="st-rate">${passRate == null ? '-' : passRate + '%'}</div><div class="hint">${s.passed_scenarios}/${s.total_scenarios} 场景</div></div>
+        <div class="card stat info"><div class="label">${t('排队 / 运行中')}</div><div class="value" id="st-active">${s.queued}<span class="muted" style="font-size:16px"> / ${s.running}</span></div><div class="hint">${t('当前活跃任务')}</div></div>
+        <div class="card stat pass"><div class="label">${t('通过')}</div><div class="value" id="st-passed">${s.passed}</div><div class="hint">${t('已完成 {n} 次', { n: s.completed })}</div></div>
+        <div class="card stat fail"><div class="label">${t('失败 / 错误')}</div><div class="value" id="st-failed">${s.failed}<span class="muted" style="font-size:16px"> / ${s.errored}</span></div><div class="hint">${t('取消 {n}', { n: s.cancelled })}</div></div>
+        <div class="card stat"><div class="label">${t('场景通过率')}</div><div class="value" id="st-rate">${passRate == null ? '-' : passRate + '%'}</div><div class="hint">${t('{passed}/{total} 场景', { passed: s.passed_scenarios, total: s.total_scenarios })}</div></div>
       </div>
       <div class="grid grid-main">
         <div class="grid" style="align-content:start">
           <div class="card">
-            <div class="card-header"><h2>最近测试</h2><a class="small" href="#/tests">查看全部 →</a></div>
+            <div class="card-header"><h2>${t('最近测试')}</h2><a class="small" href="#/tests">${t('查看全部 →')}</a></div>
             <div class="table-wrap" id="recent-tests">${renderTestTable(tests.tests)}</div>
           </div>
           <div class="card">
-            <div class="card-header"><h2>实时事件</h2><span class="muted small" id="ev-count"></span></div>
+            <div class="card-header"><h2>${t('实时事件')}</h2><span class="muted small" id="ev-count"></span></div>
             <div class="feed" id="dash-feed">${events.events.slice().reverse().map(renderEvent).join('') || '<div class="empty">暂无事件</div>'}</div>
           </div>
         </div>
@@ -400,17 +439,17 @@
                 ${runner.last_error ? `<dt>最近错误</dt><dd style="color:var(--fail)">${esc(runner.last_error)}</dd>` : ''}
               </dl>
               ${runner.pool_size > 1 ? `<div class="pool mt" id="st-pool-slots">${poolSlots(runner)}</div>` : ''}
-              <div class="mt"><a class="btn sm" href="#/runner">详情</a></div>
+              <div class="mt"><a class="btn sm" href="#/runner">${t('详情')}</a></div>
             </div>
           </div>
           <div class="card">
             <div class="card-header"><h2>场景分布</h2></div>
             <div class="card-body flex gap">
-              ${donut([['通过', s.passed_scenarios, 'var(--pass)'], ['失败', s.failed_scenarios, 'var(--fail)'], ['跳过', s.skipped_scenarios, 'var(--text-muted)']])}
+              ${donut([[t('通过'), s.passed_scenarios, 'var(--pass)'], [t('失败'), s.failed_scenarios, 'var(--fail)'], [t('跳过'), s.skipped_scenarios, 'var(--text-muted)']])}
             </div>
           </div>
           <div class="card">
-            <div class="card-header"><h2>通过率趋势</h2><a class="small" href="#/trends">详情 →</a></div>
+            <div class="card-header"><h2>通过率趋势</h2><a class="small" href="#/trends">${t('详情 →')}</a></div>
             <div class="card-body" id="dash-trend">${renderDashTrend(dashSeries)}</div>
           </div>
           <div class="card">
@@ -420,10 +459,10 @@
               <dt>WS 连接</dt><dd>${status.websocket.connections}</dd>
               <dt>事件总数</dt><dd>${status.events_published}</dd>
               <dt>概念</dt><dd>${status.concepts}</dd>
-              ${status.spec_watcher ? `<dt>规范监控</dt><dd id="st-watch" title="${status.spec_watcher.last_change_at ? `最近变更 ${esc(fmtTime(status.spec_watcher.last_change_at))}` : '尚无变更'}">${watcherSummary(status.spec_watcher)}</dd>` : ''}
+              ${status.spec_watcher ? `<dt>规范监控</dt><dd id="st-watch" title="${esc(watcherTitle(status.spec_watcher))}">${watcherSummary(status.spec_watcher)}</dd>` : ''}
               ${status.scheduler ? `<dt>测试计划</dt><dd id="st-sched">${schedulerSummary(status.scheduler)}</dd>` : ''}
               <dt>历史记录</dt><dd>${s.history_size}</dd>
-              ${status.callbacks ? `<dt>回调</dt><dd id="st-callbacks">${status.callbacks.enabled ? `${status.callbacks.delivered} 送达${status.callbacks.failed ? ` · <span style="color:var(--fail)">${status.callbacks.failed} 失败</span>` : ''}${status.callbacks.pending ? ` · ${status.callbacks.pending} 待发` : ''}` : '已禁用'}</dd>` : ''}
+              ${status.callbacks ? `<dt>回调</dt><dd id="st-callbacks">${callbackSummary(status.callbacks)}</dd>` : ''}
             </dl></div>
           </div>
         </div>
@@ -447,11 +486,11 @@
           const trendEl = $('#dash-trend');
           if (trendEl) trendEl.innerHTML = renderDashTrend(overallSeries(tr));
           const cb = st.callbacks, cbEl = $('#st-callbacks');
-          if (cb && cbEl && cb.enabled) cbEl.innerHTML = `${cb.delivered} 送达${cb.failed ? ` · <span style="color:var(--fail)">${cb.failed} 失败</span>` : ''}${cb.pending ? ` · ${cb.pending} 待发` : ''}`;
+          if (cb && cbEl) cbEl.innerHTML = callbackSummary(cb);
           const w = st.spec_watcher, wEl = $('#st-watch');
           if (w && wEl) {
             wEl.innerHTML = watcherSummary(w);
-            if (w.last_change_at) wEl.title = `最近变更 ${fmtTime(w.last_change_at)}`;
+            wEl.title = watcherTitle(w);
           }
           const sch = st.scheduler, schEl = $('#st-sched');
           if (sch && schEl) schEl.innerHTML = schedulerSummary(sch);
@@ -477,30 +516,45 @@
     const size = r.pool_size || 1;
     const alive = r.alive == null ? '-' : r.alive;
     const busy = r.busy || 0;
-    return `${size} 个进程 · ${alive} 在线${busy ? ` · <b>${busy}</b> 忙碌` : ''}`;
+    return t('{size} 个进程 · {alive} 在线', { size, alive }) + (busy ? t(' · <b>{busy}</b> 忙碌', { busy }) : '');
   }
 
   // 池中每个 Runner 进程一个小方块：颜色表示状态，悬停显示明细
   function poolSlots(r) {
     const slots = r.runners || [];
     return slots.map((s) => {
-      const title = `#${s.index} · ${s.state}${s.pid ? ` · pid ${s.pid}` : ''} · ${s.steps_executed || 0} 步${s.restart_count ? ` · 重启 ${s.restart_count}` : ''}${s.last_error ? `\n${s.last_error}` : ''}`;
+      const pid = s.pid ? ` · pid ${s.pid}` : '';
+      let title = t('#{i} · {state}{pid} · {steps} 步', { i: s.index, state: s.state, pid, steps: s.steps_executed || 0 });
+      if (s.restart_count) title += t(' · 重启 {n}', { n: s.restart_count });
+      if (s.last_error) title += `\n${s.last_error}`;
       return `<span class="slot ${esc(s.state)}" title="${esc(title)}"><span class="idx">#${s.index}</span><span class="n">${s.steps_executed || 0}</span></span>`;
     }).join('');
   }
 
+  function watcherTitle(w) {
+    return w.last_change_at ? t('最近变更 {time}', { time: fmtTime(w.last_change_at) }) : t('尚无变更');
+  }
+
   function watcherSummary(w) {
-    if (!w.enabled) return '已关闭';
+    if (!w.enabled) return t('已关闭');
     const every = w.interval_ms % 1000 === 0 ? `${w.interval_ms / 1000} s` : `${w.interval_ms} ms`;
-    return `每 ${every} · ${w.tracked_files} 个文件${w.changes ? ` · ${w.changes} 次变更` : ''}`;
+    return t('每 {every} · {n} 个文件', { every, n: w.tracked_files }) + (w.changes ? t(' · {n} 次变更', { n: w.changes }) : '');
   }
 
   function schedulerSummary(s) {
     if (!s) return '—';
     const label = s.enabled
-      ? `${s.enabled_count || 0}/${s.count || 0} 已启用${s.fires ? ` · ${s.fires} 次触发` : ''}`
-      : `已关闭${s.count ? ` · ${s.count} 个计划` : ''}`;
+      ? t('{on}/{total} 已启用', { on: s.enabled_count || 0, total: s.count || 0 }) + (s.fires ? t(' · {n} 次触发', { n: s.fires }) : '')
+      : t('已关闭') + (s.count ? t(' · {n} 个计划', { n: s.count }) : '');
     return `<a href="#/schedules">${label}</a>`;
+  }
+
+  function callbackSummary(cb) {
+    if (!cb.enabled) return t('已禁用');
+    let s = t('{n} 送达', { n: cb.delivered });
+    if (cb.failed) s += ` · <span style="color:var(--fail)">${t('{n} 失败', { n: cb.failed })}</span>`;
+    if (cb.pending) s += ` · ${t('{n} 待发', { n: cb.pending })}`;
+    return s;
   }
 
   function donut(items) {
@@ -1123,8 +1177,8 @@
 
     main.innerHTML = `${header('测试计划',
       schedulerOn
-        ? `按 UTC cron 周期性提交 · ${plans.length} 个计划 · ${plans.filter((p) => p.enabled).length} 个已启用`
-        : '调度器已关闭：cron 不会自动触发，仍可创建计划并立即运行',
+        ? t('按 UTC cron 周期性提交 · {n} 个计划 · {on} 个已启用', { n: plans.length, on: plans.filter((p) => p.enabled).length })
+        : t('调度器已关闭：cron 不会自动触发，仍可创建计划并立即运行'),
       `<a class="btn" href="#/run">▶ 提交一次</a>`)}
       ${schedulerOn ? '' : '<div class="alert warn">守护进程以 <code>--no-scheduler</code> 启动，或配置 <code>scheduler.enabled=false</code>。计划会保存，但只有「立即运行」会提交测试。</div>'}
       <search class="toolbar">
@@ -1298,7 +1352,7 @@
       cb.disabled = true;
       try {
         await api(`/schedules/${encodeURIComponent(cb.dataset.id)}`, { method: 'PUT', body: { enabled: cb.checked } });
-        toast(cb.checked ? '已启用' : '已停用', 'ok');
+        toast(cb.checked ? t('已启用') : t('已停用'), 'ok');
         navigate();
       } catch (err) {
         cb.checked = !cb.checked;
@@ -1781,6 +1835,17 @@
   // ------------------------------------------------------------
   // 启动
   // ------------------------------------------------------------
+  i18n.apply();
+  const langSel = $('#lang-select');
+  if (langSel) {
+    langSel.value = i18n.lang;
+    langSel.addEventListener('change', (e) => {
+      i18n.setLang(e.target.value);
+      i18n.apply();
+      auth.render();
+      navigate();
+    });
+  }
   $('#auth-btn').addEventListener('click', () => auth.prompt().then((saved) => { if (saved) { if (auth.protectReads) live.reconnect(); navigate(); } }));
   $('#shortcuts-btn').addEventListener('click', () => showShortcuts());
   $('#project-select').addEventListener('change', (e) => { projects.select(e.target.value); });
@@ -1841,7 +1906,7 @@
     $('#brand-version').textContent = 'v' + h.version;
     auth.required = !!h.auth_required; auth.protectReads = !!h.auth_protect_reads;
     auth.render();
-    if (auth.required && !auth.token) toast(auth.protectReads ? '服务器要求 API Token，请点击左下角"鉴权"设置' : '服务器已启用鉴权：提交/取消/删除等写操作需要 API Token', 'info', 6000);
+    if (auth.required && !auth.token) toast(auth.protectReads ? t('服务器要求 API Token，请点击左下角"鉴权"设置') : t('服务器已启用鉴权：提交/取消/删除等写操作需要 API Token'), 'info', 6000);
     live.connect();
     projects.refresh().then(() => navigate());
   }).catch(() => { live.connect(); projects.refresh().then(() => navigate()); });
