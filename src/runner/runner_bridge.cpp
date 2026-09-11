@@ -516,8 +516,8 @@ RunnerStatus RunnerBridge::getStatus() const {
         else status.state = RunnerState::DISCONNECTED;
     }
     if (stepsSource) {
-        // 步骤列表在首次查询后由 Runner 缓存，此处通常不会阻塞在网络往返上
-        for (const auto& s : stepsSource->getAllSteps()) status.implementedSteps.push_back(s.parameterizedStepText);
+        // 只用缓存：向正在 execute_step 的进程发 get_steps 会与步骤里访问本进程 HTTP 互相等待
+        for (const auto& s : stepsSource->cachedSteps()) status.implementedSteps.push_back(s.parameterizedStepText);
     }
     return status;
 }

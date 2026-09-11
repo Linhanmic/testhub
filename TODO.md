@@ -180,6 +180,7 @@
 
 - `TestHub::start()` 先绑定 HTTP 端口，再把 `TESTHUB_URL`（`public_base_url` 或 `http://127.0.0.1:<boundPort>`）和可选 `TESTHUB_TOKEN` 写入 `execution.environment` 与 Runner 子进程环境，然后才启动 Runner。`GET /status` 与 `server.started` 携带 `url`
 - `specs/selfcheck.spec` + `runners/*/step_impl/api_steps.*`：用本进程 HTTP API 检查健康、状态 URL、规范列表、Runner 在线、以及存在运行中的测试；再 POST 提交 `calculator.spec`（只断言 202，不在步骤里 `wait`，避免 `-j 1` 死锁）
+- `GET /status` / `/health` 不再向 Runner 发 `get_steps`：JSON-lines 一次一条，步骤执行中再查询步骤列表会与步骤里访问本进程 HTTP 互相等待。改为握手后预热缓存，状态接口只读缓存
 - 自举运行时当前槽位为 `busy` 而非空闲时的 `connected`，步骤「Runner 应在线」同时接受这两种可用状态
 - 测试：规范解析覆盖自举文件的引号参数；Python 集成测试跑完整 selfcheck + 子测试；Node 端到端用例末尾同样跑一遍
 
@@ -204,7 +205,7 @@
 | 迭代 14 | 进程存活检查按需进行（分配时），不加心跳线程 | 每次分配/每步执行前都会 `waitpid(WNOHANG)`，成本可忽略；崩溃的进程在下次使用时重启，UI 报告"will be restarted on next use"；额外的心跳线程只会更早发现但不会更早需要它 |
 | 迭代 15 | Node.js Runner 用 CommonJS + 模块解析别名，不引入 npm 包 | 保持仓库零第三方依赖；`require('testhub-runner')` 解析到捆绑脚本即可；async/await 是 Node 自带能力，用来验证协议对异步步骤的等待语义 |
 | 迭代 16 | 并行流采用“凑齐 N 个槽位再开工”，不降级为更少的流 | 降级会让同一测试的 suite 钩子只跑在部分进程上，语义随池占用情况漂移；排队等齐更可预期。数据驱动的每一行当作独立场景分片 |
-| 迭代 17 | 自举步骤不轮询子测试；Runner「应在线」接受 connected/busy | 步骤里 `wait` 子测试会在 `-j 1` 时占满唯一 worker 造成死锁；自举过程中当前槽位必然是 busy，断言 connected 会假失败 |
+| 迭代 17 | 自举步骤不轮询子测试；Runner「应在线」接受 connected/busy；状态接口不向忙进程发 get_steps | 步骤里 `wait` 子测试会在 `-j 1` 时占满唯一 worker 造成死锁；自举过程中当前槽位必然是 busy；JSON-lines 同步协议下 get_steps 与 execute_step 不能重叠 |
 
 ---
 

@@ -117,6 +117,13 @@ public:
     virtual std::vector<StepValue> getAllSteps() { return {}; }
 
     /**
+     * 已缓存的步骤列表，禁止向 Runner 发协议消息。
+     * GET /status 在 execute_step 期间也会调用；JSON-lines 一次只能处理一条请求，
+     * 若此处再 get_steps，步骤里访问本进程 HTTP API 会与状态查询互相等待。
+     */
+    virtual std::vector<StepValue> cachedSteps() const { return {}; }
+
+    /**
      * 询问 Runner 是否实现了某个步骤；默认基于 getAllSteps 缓存
      */
     virtual bool hasStep(const std::string& parameterizedText) {

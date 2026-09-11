@@ -348,6 +348,7 @@ bool ProcessRunner::start() {
     version_ = pong["version"].asString("");
     TH_LOG_INFO("runner", "Runner connected: " + command_ + (version_.empty() ? "" : " (" + version_ + ")") +
                           " pid=" + std::to_string(pid()));
+    getAllSteps();
     return true;
 }
 
@@ -547,12 +548,14 @@ HookResult ProcessRunner::runHook(HookType type, const ExecutionContext& context
 }
 
 std::vector<StepValue> ProcessRunner::getAllSteps() {
-    std::lock_guard<std::mutex> lock(stepsMutex_);
-    if (stepsLoaded_) return cachedSteps_;
+    {
+        std::lock_guard<std::mutex> lock(stepsMutex_);
+        if (stepsLoaded_) return cachedSteps_;
+    }
     if (!isAlive()) return {};
     Json resp = request("get_steps", Json::object(), 10000);
     if (resp.isNull()) return {};
-    cachedSteps_.clear();
+    std::vector<StepValue> loaded;
     for (const auto& s : resp["steps"].asArray()) {
         StepValue v;
         if (s.isString()) {
@@ -563,9 +566,16 @@ std::vector<StepValue> ProcessRunner::getAllSteps() {
             v.stepText = s["text"].asString(v.parameterizedStepText);
             for (const auto& p : s["params"].asArray()) if (p.isString()) v.parameters.push_back(p.asString());
         }
-        if (!v.parameterizedStepText.empty()) cachedSteps_.push_back(v);
+        if (!v.parameterizedStepText.empty()) loaded.push_back(v);
     }
+    std::lock_guard<std::mutex> lock(stepsMutex_);
+    cachedSteps_ = loaded;
     stepsLoaded_ = true;
+    return cachedSteps_;
+}
+
+std::vector<StepValue> ProcessRunner::cachedSteps() const {
+    std::lock_guard<std::mutex> lock(stepsMutex_);
     return cachedSteps_;
 }
 

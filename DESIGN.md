@@ -183,7 +183,7 @@ class Runner {                      // 抽象接口
   - **分配策略**：优先空闲且在线的槽位，其次可重启的槽位；只有所有槽位都永久失效（重启预算耗尽）时才分配失效槽位，让调用方得到明确错误而不是无限等待。
   - **逐槽自愈**：`ensureAlive(slot)` 在槽位被独占的前提下检查进程存活，按 `auto_restart` / `max_restarts`（每槽独立预算）重启；重启只影响该槽位，其他测试不受干扰；重启在锁外进行，不阻塞其他槽位的执行与状态查询。进程在两次使用之间退出时按需重启（下次分配到它时），状态里报告为 `error` + "will be restarted on next use"。
   - **生命周期**：`stopRunner()` / `restartRunner()` 先置 `draining_`（新会话等待），等待所有槽位释放，再并行停止/拉起全部进程；`lifecycleMutex_` 串行化这三种操作。
-  - `getStatus()` 聚合：任一槽位在线即 `connected`（有会话占用则 `busy`），全部离线且有失败为 `error`；`pool_size / alive / busy / restart_count（总和）` 与 `runners[]` 明细（`index/state/pid/version/restart_count/steps_executed/busy/last_error`）。Runner 事件 `runner.*` 携带 `slot`。
+  - `getStatus()` 聚合：任一槽位在线即 `connected`（有会话占用则 `busy`），全部离线且有失败为 `error`；`pool_size / alive / busy / restart_count（总和）` 与 `runners[]` 明细（`index/state/pid/version/restart_count/steps_executed/busy/last_error`）。`implemented_steps` 只读握手时预热的缓存，**禁止**在 `getStatus` 里向 Runner 发 `get_steps`（JSON-lines 一次一条，步骤实现若再访问本进程 `/health`/`/status` 会互相等待）。Runner 事件 `runner.*` 携带 `slot`。
   - 缓存 `get_steps` 结果（任一在线 Runner 即可回答，不占用槽位），供 `GET /runner/steps` 与 UI 的"未实现步骤"标注使用。
   - **自举环境**：`TestHub::start()` 先 `HttpServer::start()` 绑定端口，再把 `TESTHUB_URL`（`callbacks.public_base_url`，否则 `http://127.0.0.1:<boundPort>`）写入 `execution.environment` 与 Runner 子进程环境（`ProcessRunner` `setenv`）；启用鉴权时同步注入 `TESTHUB_TOKEN`。`GET /status` 与 `server.started` 事件携带 `url`。`specs/selfcheck.spec` 通过 `runners/*/step_impl/api_steps.*` 用这些变量调用本进程 HTTP API；步骤只断言子测试 POST 202，不轮询其结束，以免 `-j 1` 死锁。自举期间当前槽位为 `busy`，「Runner 应在线」同时接受 `connected` / `busy`。
 

@@ -127,6 +127,7 @@ public:
     StepResult executeStep(const StepExecutionRequest& request) override;
     HookResult runHook(HookType type, const ExecutionContext& context) override;
     std::vector<StepValue> getAllSteps() override;
+    std::vector<StepValue> cachedSteps() const override;
     bool hasStep(const std::string& parameterizedText) override;
 
     const std::string& lastError() const { return lastError_; }
@@ -150,7 +151,7 @@ private:
     std::map<long long, Json> responses_;
     std::atomic<long long> nextId_{1};
 
-    std::mutex stepsMutex_;
+    mutable std::mutex stepsMutex_;
     std::vector<StepValue> cachedSteps_;
     bool stepsLoaded_ = false;
 

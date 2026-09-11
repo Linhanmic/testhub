@@ -180,16 +180,22 @@ TEST_CASE("spec: repository lists and resolves example specs") {
     REQUIRE(parsed.ok());
     REQUIRE(parsed.specification);
     CHECK_EQ(parsed.specification->scenarios.size(), static_cast<size_t>(3));
-    bool foundGet = false;
-    for (const auto& st : parsed.specification->scenarios[0].steps) {
-        if (st.parameterizedText != "GET {} 的 {} 应为 {}") continue;
-        foundGet = true;
-        REQUIRE_EQ(st.args.size(), static_cast<size_t>(3));
-        CHECK_EQ(st.args[0].value, std::string("/api/v1/health"));
-        CHECK_EQ(st.args[1].value, std::string("status"));
-        CHECK_EQ(st.args[2].value, std::string("ok"));
+    bool foundHealth = false;
+    bool foundName = false;
+    for (const auto& sc : parsed.specification->scenarios) {
+        for (const auto& st : sc.steps) {
+            if (st.parameterizedText != "GET {} 的 {} 应为 {}") continue;
+            REQUIRE_EQ(st.args.size(), static_cast<size_t>(3));
+            if (st.args[0].value == "/api/v1/health" && st.args[1].value == "status" && st.args[2].value == "ok") {
+                foundHealth = true;
+            }
+            if (st.args[0].value == "/api/v1/status" && st.args[1].value == "name" && st.args[2].value == "TestHub") {
+                foundName = true;
+            }
+        }
     }
-    CHECK(foundGet);
+    CHECK(foundHealth);
+    CHECK(foundName);
 
     std::vector<std::string> missing;
     auto resolved = repo.resolve({"login.spec", "specs/calculator.spec", "nope.spec"}, &missing);
