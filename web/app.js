@@ -269,10 +269,18 @@
       return String(s).replace(trimmed, t(trimmed));
     };
     const skip = (el) => el.closest && el.closest(SKIP_LOCALIZE);
-    root.querySelectorAll('button, a.btn, th, dt, h2, h3, label, .label, .hint, .empty, .section-label, summary, .help, .check, li > span:not(.keys)').forEach((el) => {
+    const translateEl = (el) => {
       if (skip(el)) return;
-      if (el.childElementCount === 0) el.textContent = exact(el.textContent);
-    });
+      const html = el.innerHTML.trim();
+      if (html && i18n.en[html]) { el.innerHTML = t(html); return; }
+      if (el.childElementCount === 0) { el.textContent = exact(el.textContent); return; }
+      el.childNodes.forEach((n) => {
+        if (n.nodeType !== 3) return;
+        const trimmed = n.textContent.trim();
+        if (trimmed && i18n.en[trimmed]) n.textContent = n.textContent.replace(trimmed, t(trimmed));
+      });
+    };
+    root.querySelectorAll('button, a.btn, a.small, th, dt, h1, h2, h3, label, b, .label, .hint, .empty, .section-label, summary, .help, .check, p.muted, li > span:not(.keys)').forEach(translateEl);
     root.querySelectorAll('[placeholder], [title], [aria-label]').forEach((el) => {
       if (skip(el)) return;
       ['placeholder', 'title', 'aria-label'].forEach((a) => {
@@ -1049,15 +1057,17 @@
   // ------------------------------------------------------------
   routes.run = async (main, [preselect]) => {
     const specs = await api('/specs');
-    main.innerHTML = `${header('提交测试', `规范目录：<code>${esc(specs.specs_dir)}</code> · ${specs.count} 个文件 · ${specs.total_scenarios} 个场景${specs.invalid ? ` · <span style="color:var(--fail)">${specs.invalid} 个无效</span>` : ''}`)}
+    main.innerHTML = `${header('提交测试', t('规范目录：<code>{dir}</code> · {files} 个文件 · {scenarios} 个场景', {
+        dir: esc(specs.specs_dir), files: specs.count, scenarios: specs.total_scenarios,
+      }) + (specs.invalid ? t(' · <span style="color:var(--fail)">{n} 个无效</span>', { n: specs.invalid }) : ''))}
       <div class="grid grid-main">
         <form class="card" id="run-form"><div class="card-body form">
-          <label class="field">名称 <span class="help">可选，便于识别</span><input type="text" name="name" placeholder="例如：登录冒烟测试"></label>
+          <label class="field">${t('名称')} <span class="help">${t('可选，便于识别')}</span><input type="text" name="name" placeholder="${esc(t('例如：登录冒烟测试'))}"></label>
           <div class="field" style="display:flex;flex-direction:column;gap:5px">
-            <div class="flex" style="justify-content:space-between"><b>规范文件 <span class="help muted" style="font-weight:400">不选则运行全部</span></b>
-              <span class="btn-group"><button type="button" class="btn sm" id="sel-all">全选</button><button type="button" class="btn sm" id="sel-none">清空</button></span></div>
+            <div class="flex" style="justify-content:space-between"><b>${t('规范文件')} <span class="help muted" style="font-weight:400">${t('不选则运行全部')}</span></b>
+              <span class="btn-group"><button type="button" class="btn sm" id="sel-all">${t('全选')}</button><button type="button" class="btn sm" id="sel-none">${t('清空')}</button></span></div>
             <div class="spec-picker">${specs.specs.map((s) => `<label><input type="checkbox" name="spec" value="${esc(s.file)}" ${preselect === s.file ? 'checked' : ''} ${s.valid ? '' : 'disabled'}>
-              <span class="mono">${esc(s.file)}</span><span class="muted">${esc(s.heading)}</span><span class="meta">${s.scenario_count} 场景${s.is_data_driven ? ' · 数据驱动' : ''}${s.valid ? '' : ' · <span style="color:var(--fail)">无效</span>'}</span></label>`).join('') || '<div class="empty">规范目录为空，请先在“规范文件”页新建。</div>'}</div>
+              <span class="mono">${esc(s.file)}</span><span class="muted">${esc(s.heading)}</span><span class="meta">${t('{n} 场景', { n: s.scenario_count })}${s.is_data_driven ? t(' · 数据驱动') : ''}${s.valid ? '' : t(' · <span style="color:var(--fail)">无效</span>')}</span></label>`).join('') || `<div class="empty">${t('规范目录为空，请先在“规范文件”页新建。')}</div>`}</div>
           </div>
           <div class="form-row">
             <label class="field">标签表达式 <span class="help">如 <code>smoke &amp; !slow</code>，多个以逗号分隔为 AND</span><input type="text" name="tags" placeholder="smoke"></label>
@@ -1083,7 +1093,7 @@
       const fd = new FormData(form);
       const body = { spec_files: fd.getAll('spec') };
       if (fd.get('name')) body.name = fd.get('name');
-      const t = (fd.get('tags') || '').split(',').map((s) => s.trim()).filter(Boolean); if (t.length) body.tags = t;
+      const tagList = (fd.get('tags') || '').split(',').map((s) => s.trim()).filter(Boolean); if (tagList.length) body.tags = tagList;
       const sc = (fd.get('scenarios') || '').split(',').map((s) => s.trim()).filter(Boolean); if (sc.length) body.scenarios = sc;
       body.priority = fd.get('priority'); body.environment = fd.get('environment') || 'default';
       const to = parseInt(fd.get('timeout_ms') || '0', 10); if (to > 0) body.timeout_ms = to;
@@ -1100,7 +1110,7 @@
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const btn = form.querySelector('button[type=submit]'); btn.disabled = true;
-      try { const r = await api('/tests/run', { method: 'POST', body: build() }); toast(`已提交 ${r.test_id}`, 'ok'); location.hash = `#/tests/${r.test_id}`; }
+      try { const r = await api('/tests/run', { method: 'POST', body: build() }); toast(t('已提交 {id}', { id: r.test_id }), 'ok'); location.hash = `#/tests/${r.test_id}`; }
       catch (err) { $('#run-msg').textContent = err.message; $('#run-msg').style.color = 'var(--fail)'; toast(err.message, 'error'); }
       finally { btn.disabled = false; }
     });
@@ -1127,10 +1137,10 @@
     if (isNaN(d)) return esc(iso);
     const diff = (d.getTime() - Date.now()) / 1000;
     if (diff < 0) return rel(iso);
-    if (diff < 60) return `${Math.round(diff)} 秒后`;
-    if (diff < 3600) return `${Math.round(diff / 60)} 分钟后`;
-    if (diff < 86400) return `${Math.round(diff / 3600)} 小时后`;
-    return `${Math.round(diff / 86400)} 天后`;
+    if (diff < 60) return t('{n} 秒后', { n: Math.round(diff) });
+    if (diff < 3600) return t('{n} 分钟后', { n: Math.round(diff / 60) });
+    if (diff < 86400) return t('{n} 小时后', { n: Math.round(diff / 3600) });
+    return t('{n} 天后', { n: Math.round(diff / 86400) });
   }
 
   function scheduleHaystack(s) {
@@ -1260,7 +1270,7 @@
         skip_if_running: !!fd.get('skip_if_running'),
         spec_files: fd.getAll('spec'),
       };
-      const t = (fd.get('tags') || '').split(',').map((s) => s.trim()).filter(Boolean); if (t.length) body.tags = t;
+      const tagList = (fd.get('tags') || '').split(',').map((s) => s.trim()).filter(Boolean); if (tagList.length) body.tags = tagList;
       const sc = (fd.get('scenarios') || '').split(',').map((s) => s.trim()).filter(Boolean); if (sc.length) body.scenarios = sc;
       const to = parseInt(fd.get('timeout_ms') || '0', 10); if (to > 0) body.timeout_ms = to;
       const retry = parseInt(fd.get('step_retry') || '0', 10); if (retry > 0) body.step_retry = retry;
