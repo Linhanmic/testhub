@@ -233,6 +233,7 @@
 - UI：侧栏原生 `<select>`；单项时禁用以免误触；详情 hash 在切换后回到规范列表
 - 测试：单元 5（合成/JSON current/slug 去重/CLI 覆盖/往返）+ 集成切换与 409。自举增加 `GET /projects` count=1 与 `current_project=default`
 - 示例：`examples/alt-specs/hello.spec`
+- 浏览器实测（Python Runner `:18086`）：侧栏「主规范 / 备用示例」；规范页 6 个文件；切到备用后只剩 `hello.spec`，副标题为 `examples/alt-specs · 项目 alt`；总览显示项目「备用示例」
 
 ---
 
