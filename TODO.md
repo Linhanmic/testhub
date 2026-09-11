@@ -5,8 +5,8 @@
 ## 当前状态（v1.1.0）
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
-- 96 个自动化测试全部通过（74 单元 + 15 集成 + 7 Python 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
-- 约 12k 行（含前端、Python Runner、测试）
+- 109 个自动化测试全部通过（74 单元 + 16 集成 + 7 Python 协议 + 12 Node.js 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
+- 约 15k 行（含前端、Python / Node.js Runner、测试）
 
 ## 路线图
 
@@ -19,6 +19,7 @@
 - [x] 执行引擎（优先级队列、标签表达式、场景过滤、数据驱动、上下文/清理、超时、取消、fail_fast、重跑、历史）
 - [x] Runner 抽象 + 子进程桥接（JSON-lines、崩溃检测、自动重启、步骤缓存）
 - [x] Python 参考 Runner（装饰器、钩子、DataTable、Messages、SkipStep、data_store）+ 示例步骤实现
+- [x] Node.js 参考 Runner（同一 JSON-lines 协议、async 步骤、零 npm 依赖）+ 示例步骤实现；同一套 .spec 可互换执行
 - [x] 异步事件总线 + WebSocket 推送（订阅过滤、历史回放）
 - [x] 内嵌 Web UI（总览、提交、测试记录、结果树、实时执行树、规范浏览/编辑/校验、Runner、事件流）
 - [x] 测试体系（自带迷你框架、单元 + 集成 + 协议测试、ctest、CI）
@@ -32,7 +33,6 @@
 
 ### P1 — 下一步（按优先级）
 
-- [ ] **Node.js 参考 Runner**：复用 JSON-lines 协议，验证语言无关性
 - [ ] **测试内并行**：把单个测试的场景拆到池中多个进程（Gauge `--parallel` 流语义），需要按进程隔离 suite/spec 钩子
 
 ### P2 — 增强
@@ -162,6 +162,15 @@
 - 测试：7 个单测（注入假 Runner：并行分配与会话绑定、阻塞等待与 busy 状态、逐槽重启、每槽重启预算与健康槽位优先、会话内钩子绑定、并发安全收缩、停止等待与重启替换）+ 1 个真实 Python 池集成测试（两进程并行 < 1.5 s、`kill -9` 后按需自愈且孤儿进程组消失、手动重启替换全部进程）；gcc/clang/TSan 全绿，35 轮循环零失败
 - 浏览器实测：`-j 3` 提交 3 个 5 s 的 `slow.spec`，三个测试 5.00 / 5.00 / 5.01 s 同时完成（之前串行为 7 s / 10 s）；`kill -9` 一个进程后再提交 3 个并发测试，该槽位重启（restart 1）、全部通过
 
+### 迭代 15 — Node.js 参考 Runner
+
+- `runners/node/testhub_runner.js`：零 npm 依赖的 CommonJS 实现，协议与 Python Runner 完全一致；`step()` / `beforeScenario()` 等注册 API，`Messages` / `DataTable` / `SkipStep` / `dataStore`；步骤函数可以是 `async`，消息严格按顺序 `await`
+- `require('testhub-runner')` 通过 `Module._resolveFilename` 别名解析到本文件，步骤实现无需 npm 安装；`console.log` 重定向到 stderr，不污染协议通道
+- 示例 `step_impl/login_steps.js` 与 Python 版一一对应（含 `等待 <seconds> 秒` 的 async 实现），同一套 `specs/` 可互换执行
+- `RunnerBridge::defaultCommandForLanguage("node"|"js"|"javascript"|"nodejs")` 自动定位捆绑脚本；CMake `find_program(node)` 注册 `node_runner_protocol`；CI 安装 Node.js 22 并独立跑协议测试
+- 测试：12 个协议用例（ping/get_steps/场景通过/断言失败/缺实现/表格/async 等待/dataStore 清空/未知类型/非法 JSON/缺失目录/kill 退出 0）+ 1 个集成测试（login+calculator+checkout 12 场景全部通过、失败场景带回 AssertionError 堆栈、手动重启换 PID）
+- 实测：`--language node --dir runners/node -j 3` 三个含 5 s async 等待的测试 5.02 / 5.03 / 5.02 s 同时完成，每进程各执行 75 步；UI Runner 页显示语言 `node`、版本 `node-1.0`、三进程池
+
 ---
 
 ## 决策记录
@@ -181,6 +190,7 @@
 | 迭代 13 | 目录监控用轮询快照而非 inotify/FSEvents | 零依赖、三平台同一实现、无需处理事件合并与队列溢出；规范目录规模小，秒级轮询开销可忽略；稳定窗口天然解决编辑器分步写入 |
 | 迭代 14 | Runner 池的分配粒度从"场景"改为"测试"（推翻迭代 5 的结论） | 迭代 5 只有一个进程，场景级是在"串行"里争取交错；有了多进程后，测试级让每个测试独占进程：suite/spec 钩子天然只在自己的进程上执行、无需广播、不同测试互不干扰；代价是 `pool_size < -j` 时多余 worker 空等，而默认池大小跟随 `-j` 消除了这一情形 |
 | 迭代 14 | 进程存活检查按需进行（分配时），不加心跳线程 | 每次分配/每步执行前都会 `waitpid(WNOHANG)`，成本可忽略；崩溃的进程在下次使用时重启，UI 报告"will be restarted on next use"；额外的心跳线程只会更早发现但不会更早需要它 |
+| 迭代 15 | Node.js Runner 用 CommonJS + 模块解析别名，不引入 npm 包 | 保持仓库零第三方依赖；`require('testhub-runner')` 解析到捆绑脚本即可；async/await 是 Node 自带能力，用来验证协议对异步步骤的等待语义 |
 
 ---
 
@@ -189,7 +199,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 96 个，全部通过；`ctest` 约 5 s；TSan 零告警 |
+| 自动化测试 | 109 个，全部通过（74 单元 + 16 集成 + 7 Python 协议 + 12 Node 协议）；`ctest` 约 5 s；TSan 零告警 |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
 | 代码规模 | 约 14k 行（C++ 约 10.2k，前端约 1.2k，Python 约 0.7k，测试约 2.4k） |

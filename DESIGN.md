@@ -52,6 +52,7 @@ TestHub 复用 Gauge 的规范语法（`.spec` / `.cpt`），便于迁移已有�
                                               │ stdin/stdout JSON-lines（每进程一对管道）
                                               ▼
                        runners/python/testhub_runner.py ×N → step_impl/*.py
+                       或 runners/node/testhub_runner.js ×N → step_impl/*.js
 ```
 
 ### 2.1 线程模型
@@ -176,7 +177,7 @@ class Runner {                      // 抽象接口
 - `ProcessRunner`：启动子进程（POSIX `fork/exec` 经 `/bin/sh -c`，Windows `CreateProcess`），stdin 写请求、stdout 读响应、stderr 直通日志；请求携带递增 `id`，响应按 `id` 匹配，支持超时。
 - `ProcessRunner::stop()` 先发 `kill` 消息礼貌等待，再对**进程组**发 SIGTERM/SIGKILL。命令经 `sh -c` 启动，子进程 `setpgid(0,0)` 自成进程组；若 `sh` 被外部杀死，真正的 Runner 会成为孤儿并继续持有管道，读线程永远等不到 EOF——因此即使直接子进程已退出也要清理进程组（迭代 14 修复的死锁）。
 - `RunnerBridge`（Runner 池）：
-  - 按 `runner.language` 选择实现：`mock` / `python`（自动定位 `runners/python/testhub_runner.py`：`$TESTHUB_HOME`、可执行文件所在目录及其上级、`share/testhub`、当前目录）/ `node` / `custom`（`runner.command`）；`setRunnerFactory()` 允许测试/嵌入方注入自定义 Runner。
+  - 按 `runner.language` 选择实现：`mock` / `python`（自动定位 `runners/python/testhub_runner.py`）/ `node`/`js`/`javascript`/`nodejs`（自动定位 `runners/node/testhub_runner.js`）/ `custom`（`runner.command`）；查找根为 `$TESTHUB_HOME`、可执行文件所在目录及其上级、`share/testhub`、当前目录。`setRunnerFactory()` 允许测试/嵌入方注入自定义 Runner。
   - **槽位**：`runner.pool_size`（`--runner-pool`，0 = 跟随 `max_concurrent_tests`，上限 64）个 `Slot{runner, state, restartCount, users, stepsExecuted…}`。启动时先拉起槽位 0 探测 `isConcurrencySafe()`：并发安全（mock）→ 池收缩为 1 个共享槽位；否则并行拉起其余进程，每个子进程可通过环境变量 `TESTHUB_RUNNER_INDEX` / `TESTHUB_RUNNER_POOL_SIZE` 得知自己的位置。
   - **会话**：`acquireSession()` 返回 RAII `Session`，独占一个空闲槽位并通过 `thread_local` 绑定到当前线程；此后该线程的 `executeStep/runHook` 都落在绑定的 Runner 上。引擎在 `executeTest` 开始处获取会话并持有到测试结束——一个测试 = 一个进程（before_suite … after_suite 全部同进程，与 Gauge 并行流语义一致），不同测试真正并行；没有空闲槽位时测试保持 `queued` 等待。会话外的调用（`GET /runner/steps`、独立钩子）临时占用一个空闲槽位。
   - **分配策略**：优先空闲且在线的槽位，其次可重启的槽位；只有所有槽位都永久失效（重启预算耗尽）时才分配失效槽位，让调用方得到明确错误而不是无限等待。
@@ -303,7 +304,7 @@ GET /api/v1/tests/test-20260910-142940-001
 
 ### 5.3 Runner 通信协议
 
-传输：Runner 进程 stdin 接收请求、stdout 返回响应，**每行一个 JSON 对象**；stderr 为自由日志。Runner 的 `print` 应重定向到 stderr（Python 参考实现已处理）。
+传输：Runner 进程 stdin 接收请求、stdout 返回响应，**每行一个 JSON 对象**；stderr 为自由日志。步骤实现里的 `print` / `console.log` 应重定向到 stderr（Python 与 Node 参考实现均已处理）。
 
 请求均含 `id`（整数）与 `type`；响应回带同一 `id`。
 
@@ -332,7 +333,10 @@ Runner 可随时主动发送 `{"type":"log","level":"info","message":"..."}`，T
  "tags":["smoke","auth"],"data_row":{"a":"1","b":"2"},"environment":{"ENV":"default"}}
 ```
 
-Python 参考 Runner（`runners/python/testhub_runner.py`）提供 `@step("文本 <参数>")`、`@before_scenario` 等装饰器、`DataTable`、`Messages.write()`、`SkipStep`、`data_store.{suite,spec,scenario}` 与 `ExecutionContext`。
+两个参考 Runner 实现同一协议，同一套 `.spec` 可互换执行：
+
+- Python（`runners/python/testhub_runner.py`）：`@step("文本 <参数>")`、`@before_scenario` 等装饰器、`DataTable`、`Messages.write()`、`SkipStep`、`data_store.{suite,spec,scenario}` 与 `ExecutionContext`。
+- Node.js（`runners/node/testhub_runner.js`，零 npm 依赖）：`step('文本 <参数>', fn)`、`beforeScenario(fn)` 等、同样的 `DataTable` / `Messages` / `SkipStep` / `dataStore`；步骤函数可以是 `async`，Runner 会按消息顺序 `await`。`require('testhub-runner')` 通过模块解析别名指向本文件，无需安装。`pong.version` 为 `node-1.0`。
 
 ## 6. 配置
 
@@ -372,6 +376,7 @@ src/
   util/                    json, http_client, sha1, base64, logger, string_util, file_util, time_util
 web/                       index.html, app.js, app.css, favicon.svg
 runners/python/            testhub_runner.py, step_impl/, test_runner_protocol.py
+runners/node/              testhub_runner.js, step_impl/, test_runner_protocol.js
 specs/                     示例规范与 concepts/
 tests/                     test_framework.h, test_main.cpp, test_*.cpp, test_integration.cpp
 cmake/EmbedResources.cmake
@@ -381,10 +386,10 @@ cmake/EmbedResources.cmake
 ## 8. 质量保障
 
 - **单元测试**（`testhub_unit_tests`）：JSON 解析/序列化/下标；规范解析（标题、标签、上下文、清理、数据表、参数、概念、错误/警告）；标签表达式；优先级队列；事件总线通配与历史；HTTP 请求解析、路由、流水线、ETag、HEAD/405、请求过滤器；鉴权策略（读/写、凭据来源、常量时间比较）；WebSocket 握手与帧；执行引擎（mock Runner：过滤、数据驱动、超时、取消、fail_fast、重跑、并发会话）；结果持久化（JSON 往返、损坏文件跳过、重启回放与裁剪）；报表（JUnit 结构与计数、转义、空结果、HTML 自包含）；规范目录监控；Runner 池（注入假 Runner：并行分配与会话绑定、阻塞等待、逐槽重启与预算、健康槽位优先、并发安全收缩、停止/重启生命周期）。
-- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）、Bearer Token（写保护与全保护两种模式、WebSocket 查询参数）、WebSocket 秒连秒断压力回归、目录监控端到端、**真实 Python Runner 池**（两个进程并行执行两个 0.8 s 的测试总耗时 < 1.5 s；`kill -9` 其中一个进程后按需自愈且孤儿进程组被清理；手动重启替换全部进程；无 `python3` 时跳过）。
+- **集成测试**（`testhub_integration_tests`）：在临时目录复制 `specs/`，以端口 0 启动完整服务器，用原生 TCP 客户端验证 REST 全流程、并发请求、大正文、流水线、WebSocket 事件流、规范 CRUD、取消、重启后历史回放、回调投递（503 后重试成功、连接拒绝后放弃）、Bearer Token（写保护与全保护两种模式、WebSocket 查询参数）、WebSocket 秒连秒断压力回归、目录监控端到端、**真实 Python Runner 池**（两个进程并行执行两个 0.8 s 的测试总耗时 < 1.5 s；`kill -9` 其中一个进程后按需自愈且孤儿进程组被清理；手动重启替换全部进程；无 `python3` 时跳过）、**真实 Node.js Runner**（同一套 login/calculator/checkout 规范全部通过；断言失败带回 `AssertionError` 堆栈；未实现步骤报 error；无 `node` 时跳过）。
 - **并发正确性**：所有线程句柄的赋值与检查共享同一把锁（WebSocket 读线程见 `Connection::readerMutex`）；停止流程在持锁状态下改标志再 `notify`，避免丢失唤醒；终态记录先落盘再对外可见。排查偶发问题时用 ThreadSanitizer 构建（`-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"`）运行集成测试，当前零告警。
-- **协议测试**（`python_runner_protocol`）：以子进程启动 Python Runner，验证 ping/get_steps/execute_step/hook/kill 与错误路径。
-- **CI**：Ubuntu（g++、clang++）与 macOS，`-Wall -Wextra -Wpedantic -Werror`，`ctest`，二进制冒烟（curl）。
+- **协议测试**：`python_runner_protocol`（子进程启动 Python Runner，验证 ping/get_steps/execute_step/hook/kill 与错误路径）；`node_runner_protocol`（同样覆盖 async 步骤等待、`console.log` 不污染协议通道、缺失实现目录、非法 JSON 不杀死进程）。
+- **CI**：Ubuntu（g++、clang++）与 macOS，`-Wall -Wextra -Wpedantic -Werror`，`ctest`，二进制冒烟（curl），独立运行 Python / Node 协议测试；CI 安装 Python 3.x 与 Node.js 22。
 
 ## 9. 已知限制与演进方向
 

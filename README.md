@@ -17,11 +17,11 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 | 报表 | 按需导出 JUnit XML（供 Jenkins / GitLab / GitHub Actions 收集）与自包含 HTML 报告；UI 一键下载 |
 | 回调 | 请求携带 `callback_url`，测试结束后 POST JSON 摘要（含失败场景清单与报表链接），失败按指数退避重试 |
 | 鉴权 | 可选 Bearer Token：默认保护写操作，可扩展到读操作与 WebSocket；UI 内置 token 输入 |
-| Runner | 跨平台子进程桥接 + JSON-lines 协议；内置 mock Runner；Python 参考 Runner（装饰器式步骤实现、钩子、数据表、消息）；**Runner 池**：每个并发测试独占一个 Runner 进程真正并行，进程逐个自愈、按需重启 |
+| Runner | 跨平台子进程桥接 + JSON-lines 协议；内置 mock Runner；**Python** 与 **Node.js** 两个参考 Runner（步骤注册、钩子、数据表、消息；Node 支持 async 步骤），同一套 .spec 可互换执行；**Runner 池**：每个并发测试独占一个 Runner 进程真正并行，进程逐个自愈、按需重启 |
 | 服务端 | 多线程 HTTP/1.1（keep-alive、流水线、Content-Length、超时、`{param}` 路由、CORS、HEAD/OPTIONS、ETag 静态资源、SPA 回退） |
 | 实时性 | 异步事件总线；`/ws/v1/events` WebSocket 推送（按类型/测试 ID 订阅、历史回放） |
 | Web UI | 内嵌单页应用：总览、提交测试、测试记录、结果树、运行中实时执行树、规范浏览/编辑/校验、Runner 状态、事件流、暗色模式 |
-| 质量 | 74 个单元测试 + 15 个 HTTP/WS 集成测试 + 7 个 Python 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
+| 质量 | 74 个单元测试 + 16 个 HTTP/WS 集成测试 + 7 个 Python 协议测试 + 12 个 Node.js 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
 
 ## 快速开始
 
@@ -43,6 +43,9 @@ ctest --test-dir build --output-on-failure   # 可选：运行全部测试
 
 # 使用 Python 参考 Runner 执行仓库自带的示例规范
 ./build/testhub --port 8080 --language python --dir runners/python
+
+# 同一套规范，换用 Node.js 参考 Runner（协议语言无关）
+./build/testhub --port 8080 --language node --dir runners/node
 
 # 4 个测试并发：默认拉起 4 个 Runner 进程（Runner 池），每个测试独占一个进程
 ./build/testhub --language python --dir runners/python -j 4
@@ -106,7 +109,19 @@ def result_should_be(expected):
     assert data_store.scenario["result"] == int(expected)
 ```
 
-Runner 启动时会加载 `--dir` 下 `step_impl/` 中的全部 Python 文件。更多示例见 `specs/` 与 `runners/python/step_impl/`，协议细节见 [DESIGN.md](DESIGN.md#53-runner-通信协议)。
+同一步骤的 Node.js 实现（`runners/node/step_impl/calc_steps.js`，支持 `async` 函数）：
+
+```js
+const assert = require('assert');
+const { step, dataStore } = require('testhub-runner');
+
+step('输入第一个数 <a>', (a) => { dataStore.scenario.a = Number(a); });
+step('结果应该是 <expected>', async (expected) => {
+    assert.strictEqual(dataStore.scenario.result, Number(expected));
+});
+```
+
+Runner 启动时会加载 `--dir` 下 `step_impl/` 中的全部 `.py` / `.js` 文件。更多示例见 `specs/`、`runners/python/step_impl/` 与 `runners/node/step_impl/`，协议细节见 [DESIGN.md](DESIGN.md#53-runner-通信协议)。
 
 ## API 端点
 
@@ -187,7 +202,7 @@ WebSocket 连接后发送 `{"action":"subscribe","events":["test.*","scenario.*"
 │                MockRunner    ProcessRunner ×N (stdin/stdout JSON-lines)        │
 └─────────────────────────────────────┼─────────────────────────────────────────┘
                                       ▼
-                     runners/python/testhub_runner.py ×N  ( step_impl/*.py )
+        runners/python/testhub_runner.py ×N ( step_impl/*.py )  或  runners/node/testhub_runner.js ×N ( step_impl/*.js )
 ```
 
 详细设计见 [DESIGN.md](DESIGN.md)，开发指南见 [QUICKSTART.md](QUICKSTART.md)，任务与迭代记录见 [TODO.md](TODO.md)。
@@ -208,7 +223,8 @@ src/
   model/                types, json_convert
   util/                 json, sha1, base64, logger, string/file/time 工具
 web/                    Web UI 源码（index.html, app.js, app.css, favicon.svg）
-runners/python/         参考 Runner、示例步骤实现、协议自测
+runners/python/         Python 参考 Runner、示例步骤实现、协议自测
+runners/node/           Node.js 参考 Runner（同一协议，async 步骤）、示例步骤实现、协议自测
 specs/                  示例规范（login / calculator / checkout / slow）与概念
 tests/                  单元测试与集成测试（自带迷你测试框架）
 .github/workflows/      CI

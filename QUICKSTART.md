@@ -9,7 +9,7 @@
 | C++ 编译器 | GCC 9+ / Clang 10+ / MSVC 2019+ | 需要完整 C++17 |
 | CMake | 3.16+ | |
 | Python | 3.8+（可选） | 运行 Python 参考 Runner 及其协议测试 |
-| Node.js | 任意（可选） | 仅用于 `node --check web/app.js` 语法检查 |
+| Node.js | 16+（可选） | 运行 Node.js 参考 Runner 及其协议测试；也用于 `node --check web/app.js` |
 
 没有第三方 C++ 依赖，无需包管理器。
 
@@ -34,11 +34,13 @@ ctest --test-dir build --output-on-failure             # 运行全部测试
 - `testhub_unit_tests` — JSON、规范解析器、标签过滤、队列、事件总线、HTTP、WebSocket 帧、执行引擎（使用 mock Runner）
 - `testhub_integration_tests` — 启动真实服务器（端口 0），用原生 TCP 客户端验证 REST、流水线、并发、WebSocket 事件流、规范 CRUD、取消
 - `python_runner_protocol` — 以子进程方式启动 Python Runner，验证 JSON-lines 协议
+- `node_runner_protocol` — 以子进程方式启动 Node.js Runner，验证同一协议（含 async 步骤）
 
 ```bash
 ./build/tests/testhub_unit_tests --filter "spec:"      # 只跑名称包含 spec: 的用例
 ./build/tests/testhub_integration_tests --list
 python3 runners/python/test_runner_protocol.py -v
+node runners/node/test_runner_protocol.js
 ```
 
 ## 3. 运行
@@ -46,6 +48,7 @@ python3 runners/python/test_runner_protocol.py -v
 ```bash
 ./build/testhub --port 8080 --log-level debug                       # mock Runner
 ./build/testhub --port 8080 --language python --dir runners/python  # Python Runner
+./build/testhub --port 8080 --language node --dir runners/node      # Node.js Runner（同一套 specs）
 ./build/testhub --port 8080 --web-dir web                            # 前端开发：直接读取 web/ 目录，改完刷新即生效
 ```
 
@@ -88,6 +91,7 @@ src/model/json_convert.h   模型 ↔ Json
 src/util/json.h            零依赖 JSON（解析/序列化/下标访问）
 web/                       前端：index.html + app.js（hash 路由 SPA）+ app.css
 runners/python/            testhub_runner.py（协议实现 + 装饰器 API）、step_impl/、test_runner_protocol.py
+runners/node/              testhub_runner.js（同一协议 + async 步骤）、step_impl/、test_runner_protocol.js
 ```
 
 ## 5. 常见任务
@@ -130,7 +134,7 @@ http.get("/api/v1/hello/{name}", [this](const HttpRequest& req) {
 → {"type":"kill"}                      （进程退出）
 ```
 
-完整协议见 [DESIGN.md §5.3](DESIGN.md#53-runner-通信协议)，参考实现见 `runners/python/testhub_runner.py`。用 `--language custom --runner-cmd "node my_runner.js"` 接入。
+完整协议见 [DESIGN.md §5.3](DESIGN.md#53-runner-通信协议)。参考实现：`runners/python/testhub_runner.py` 与 `runners/node/testhub_runner.js`（`require('testhub-runner')` 无需 npm 安装）。用 `--language python` / `--language node`，或 `--language custom --runner-cmd "node my_runner.js"` 接入。
 
 并发（`-j N`）时 TestHub 默认启动 N 个 Runner 进程组成池，每个测试独占一个进程，因此 Runner 只需处理串行请求、不必线程安全；进程可通过环境变量 `TESTHUB_RUNNER_INDEX` / `TESTHUB_RUNNER_POOL_SIZE` 区分自己（例如为每个进程分配独立的浏览器 profile 或端口）。`--runner-pool <n>` 可单独指定进程数。收到 `kill` 后请尽快退出，否则 1.5 s 后会被 SIGTERM/SIGKILL 终止整个进程组。
 
@@ -144,6 +148,7 @@ http.get("/api/v1/hello/{name}", [this](const HttpRequest& req) {
 - `GET /api/v1/events?limit=500` 或 UI 的"事件流"页面可回放最近事件；
 - Web UI 的规范页会用 `GET /api/v1/runner/steps` 标出 Runner 未实现的步骤；
 - Python Runner 可单独调试：`python3 runners/python/testhub_runner.py --impl-dir runners/python/step_impl --list-steps`；
+- Node.js Runner 可单独调试：`node runners/node/testhub_runner.js --impl-dir runners/node/step_impl --list-steps`；
 - 集成测试失败时，用 `./build/tests/testhub_integration_tests --filter <name>` 单独复现，服务器日志会一并输出。
 
 ## 7. 常见问题
@@ -169,6 +174,7 @@ http.get("/api/v1/hello/{name}", [this](const HttpRequest& req) {
 cmake --build build -j && ctest --test-dir build
 node --check web/app.js
 python3 runners/python/test_runner_protocol.py
+node runners/node/test_runner_protocol.js
 ```
 
 CI（`.github/workflows/ci.yml`）会在 Linux（g++ / clang++）和 macOS 上以 `-Werror` 构建并运行上述全部测试。

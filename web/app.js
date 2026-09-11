@@ -859,13 +859,13 @@
             <div class="card-body">${steps.steps.length ? steps.steps.map((s) => `<div class="step"><span class="mark">·</span><span class="text">${highlightStep(s.parameterized_text)}</span></div>`).join('') : '<div class="muted">该 Runner 未报告步骤列表（mock Runner 接受任意步骤）。</div>'}</div></div>
         </div>
         <div class="card mt"><div class="card-header"><h2>接入自定义 Runner</h2></div><div class="card-body">
-          <p>TestHub 通过 <b>JSON-lines</b> 协议与 Runner 子进程通信（stdin/stdout 每行一个 JSON）。启动参数：<code>--language python</code> 或 <code>--runner-cmd "python3 -m testhub_runner"</code>。</p>
+          <p>TestHub 通过 <b>JSON-lines</b> 协议与 Runner 子进程通信（stdin/stdout 每行一个 JSON）。启动参数：<code>--language python</code>、<code>--language node</code> 或任意 <code>--runner-cmd "..."</code>。</p>
           <pre class="code-view">→ {"id":1,"type":"execute_step","step_text":"Enter username \\"admin\\"","parameterized_text":"Enter username {}","args":[{"type":"static","value":"admin"}],"context":{...}}
 ← {"id":1,"type":"step_result","status":"passed","duration_ms":12,"messages":["logged in"]}
 → {"id":2,"type":"hook","hook":"before_scenario","context":{...}}    ← {"id":2,"type":"hook_result","status":"passed"}
 → {"id":3,"type":"get_steps"}                                        ← {"id":3,"type":"steps","steps":["Enter username {}"]}
 → {"id":4,"type":"ping"}                                             ← {"id":4,"type":"pong","version":"1.0"}</pre>
-          <p class="muted small mt">参考实现见仓库 <code>runners/python/testhub_runner.py</code>。</p>
+          <p class="muted small mt">参考实现见仓库 <code>runners/python/testhub_runner.py</code>（Python）与 <code>runners/node/testhub_runner.js</code>（Node.js，支持 async 步骤）；两者实现同一协议，可用同一套 .spec 互换验证。</p>
         </div></div>`;
       $('#restart').onclick = async () => { try { const r = await api('/runner/restart', { method: 'POST' }); toast(r.message, r.restarted ? 'ok' : 'error'); load(); } catch (e) { toast(e.message, 'error'); } };
     };
