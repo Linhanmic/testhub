@@ -189,19 +189,23 @@
   // ------------------------------------------------------------
   const routes = {};
   let cleanup = null;
+  const PAGE_TITLES = { dashboard: '总览', run: '提交测试', tests: '测试记录', specs: '规范文件', runner: 'Runner', events: '事件流' };
   function navigate() {
     const hash = location.hash.replace(/^#\/?/, '') || 'dashboard';
     const [name, ...rest] = hash.split('/');
     const page = routes[name] || routes.dashboard;
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === name));
+    document.title = (rest[0] ? decodeURIComponent(rest[0]) : (PAGE_TITLES[name] || name)) + ' · TestHub';
     if (cleanup) { try { cleanup(); } catch {} cleanup = null; }
     // 用全新节点替换 #main，丢弃上一页面注册的所有事件监听器
     const old = $('#main');
     const main = old.cloneNode(false);
     old.replaceWith(main);
     main.innerHTML = '<div class="loading">正在加载…</div>';
-    Promise.resolve(page(main, rest.map(decodeURIComponent))).then((c) => { if (typeof c === 'function') cleanup = c; })
-      .catch((e) => { main.innerHTML = `<div class="alert error">加载失败：${esc(e.message)}</div>`; });
+    Promise.resolve(page(main, rest.map(decodeURIComponent))).then((c) => {
+      if (typeof c === 'function') cleanup = c;
+      main.focus({ preventScroll: true });
+    }).catch((e) => { main.innerHTML = `<div class="alert error">加载失败：${esc(e.message)}</div>`; });
   }
   window.addEventListener('hashchange', navigate);
 
@@ -226,6 +230,94 @@
       }
     }
     return `<div class="ev"><span class="ts">${fmtClock(ev.timestamp)}</span><span class="type ${esc(cat)}">${esc(ev.event)}</span><span class="detail">${parts.join(' ')}</span></div>`;
+  }
+
+  function downloadJson(filename, data) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.rel = 'noopener';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function treeToolbarHtml(failOnly, query) {
+    return `<div class="toolbar" id="tree-toolbar">
+      <label class="grow" for="tree-q"><span class="visually-hidden">搜索结果树</span>
+        <input type="search" id="tree-q" placeholder="搜索场景或步骤…" value="${esc(query)}" autocomplete="off"></label>
+      <label class="check"><input type="checkbox" id="tree-fail" ${failOnly ? 'checked' : ''}> 只看失败</label>
+      <span class="muted small" id="tree-count"></span>
+    </div>`;
+  }
+
+  function applyTreeFilter(root, failOnly, query) {
+    if (!root) return;
+    const q = (query || '').trim().toLowerCase();
+    const hide = (el, on) => {
+      if (!el) return;
+      if (on) {
+        if ('onbeforematch' in HTMLElement.prototype) el.setAttribute('hidden', 'until-found');
+        else el.hidden = true;
+      } else {
+        el.removeAttribute('hidden');
+      }
+    };
+    const scenarios = root.querySelectorAll('.node.scenario');
+    let shown = 0;
+    scenarios.forEach((sc) => {
+      const pillEl = sc.querySelector('.node-head .pill');
+      const state = pillEl ? [...pillEl.classList].find((c) => c !== 'pill') || '' : '';
+      const nameEl = sc.querySelector('.node-head > span:not(.caret):not(.pill):not(.muted):not(.dur):not(.datarow)');
+      const scName = (nameEl ? nameEl.textContent : '').toLowerCase();
+      const nameHit = !q || scName.includes(q);
+      const stepEls = [...sc.querySelectorAll('.step')];
+      const stepHit = !q || stepEls.some((st) => st.textContent.toLowerCase().includes(q));
+      const failHide = failOnly && state === 'passed';
+      const qHide = !!(q && !nameHit && !stepHit);
+      const out = failHide || qHide;
+      hide(sc, out);
+      if (!out) {
+        shown++;
+        if (q || (failOnly && state !== 'passed')) sc.classList.add('open');
+      }
+      stepEls.forEach((st) => {
+        const passed = st.classList.contains('passed');
+        const missQ = q && !nameHit && !st.textContent.toLowerCase().includes(q);
+        hide(st, (failOnly && passed) || missQ);
+      });
+    });
+    root.querySelectorAll('.tree > .node').forEach((spec) => {
+      const scs = spec.querySelectorAll(':scope > .node-body > .node.scenario');
+      const any = [...scs].some((n) => !n.hasAttribute('hidden'));
+      hide(spec, scs.length > 0 && !any);
+      if (any && (q || failOnly)) spec.classList.add('open');
+    });
+    const count = $('#tree-count');
+    if (count) count.textContent = (q || failOnly) ? `显示 ${shown} / ${scenarios.length} 个场景` : `${scenarios.length} 个场景`;
+  }
+
+  function showShortcuts() {
+    if ($('#shortcuts-dlg')) { $('#shortcuts-dlg').showModal(); return; }
+    const dlg = document.createElement('dialog');
+    dlg.id = 'shortcuts-dlg';
+    dlg.className = 'modal';
+    dlg.setAttribute('aria-labelledby', 'shortcuts-title');
+    dlg.innerHTML = `<div class="card-header"><h2 id="shortcuts-title">键盘快捷键</h2></div>
+      <div class="card-body">
+        <ul class="shortcuts-list">
+          <li><span>打开本说明</span><span class="keys"><kbd>?</kbd></span></li>
+          <li><span>跳到搜索框</span><span class="keys"><kbd>/</kbd></span></li>
+          <li><span>只看失败（结果树）</span><span class="keys"><kbd>f</kbd></span></li>
+          <li><span>暂停 / 继续事件流</span><span class="keys"><kbd>p</kbd></span></li>
+          <li><span>总览 / 提交 / 测试</span><span class="keys"><kbd>g</kbd> <kbd>d</kbd> · <kbd>g</kbd> <kbd>r</kbd> · <kbd>g</kbd> <kbd>t</kbd></span></li>
+          <li><span>规范 / Runner / 事件</span><span class="keys"><kbd>g</kbd> <kbd>s</kbd> · <kbd>g</kbd> <kbd>n</kbd> · <kbd>g</kbd> <kbd>e</kbd></span></li>
+          <li><span>关闭对话框</span><span class="keys"><kbd>Esc</kbd></span></li>
+        </ul>
+        <div class="flex" style="justify-content:flex-end"><button class="btn primary" type="button" data-x="close">关闭</button></div>
+      </div>`;
+    document.body.appendChild(dlg);
+    dlg.addEventListener('click', (e) => { if (e.target.closest('[data-x=close]')) dlg.close(); });
+    dlg.showModal();
   }
 
   // ------------------------------------------------------------
@@ -547,6 +639,11 @@
     events.events.forEach(liveTree.apply);
 
     const isActive = () => status.state === 'queued' || status.state === 'running';
+    let failOnly = false;
+    let treeQuery = '';
+    let eventLog = (events.events || []).slice();
+    let evPaused = false;
+    let evHeld = [];
     const statusCardHtml = () => `
       <div class="flex gap" style="justify-content:space-between;margin-bottom:8px">
         <div><b>${status.executed_scenarios}</b> / ${status.total_scenarios} 场景 · <span style="color:var(--pass)">${status.passed_scenarios} 通过</span> · <span style="color:var(--fail)">${status.failed_scenarios} 失败</span> · ${status.skipped_scenarios} 跳过</div>
@@ -556,9 +653,12 @@
       ${isActive() && status.current_step ? `<div class="mt small muted">当前：<span class="mono">${esc(status.current_spec)}</span> › ${esc(status.current_scenario)} › <span class="mono">${esc(status.current_step)}</span></div>` : ''}
       ${(status.errors || []).map((e) => `<div class="alert error mt">${esc(e)}</div>`).join('')}
       ${(status.warnings || []).map((e) => `<div class="alert warn mt">${esc(e)}</div>`).join('')}`;
-    const treeHtml = () => (result ? renderResultTree(result) : (isActive() ? liveTree.render(status.state) : '<div class="card"><div class="empty">无结果</div></div>'));
+    const treeInner = () => (result ? renderResultTree(result) : (isActive() ? liveTree.render(status.state) : '<div class="card"><div class="empty">无结果</div></div>'));
+    const treeHtml = () => `${treeToolbarHtml(failOnly, treeQuery)}<div id="tree-body">${treeInner()}</div>`;
+    const paintTreeFilter = () => applyTreeFilter($('#tree-body', main) || $('#result-tree', main), failOnly, treeQuery);
 
     const render = () => {
+      evHeld = [];
       const active = isActive();
       const req = status.request || {};
       const r = result || {};
@@ -591,11 +691,17 @@
               <dt>耗时</dt><dd>${fmtDur(r.duration ?? status.duration)}</dd>
               ${Object.keys(req.metadata || {}).length ? `<dt>元数据</dt><dd>${esc(JSON.stringify(req.metadata))}</dd>` : ''}
             </dl></div></div>
-            <div class="card"><div class="card-header"><h2>事件</h2><span class="muted small" id="detail-ev-count">${events.events.length}</span></div>
-              <div class="feed" id="detail-feed">${events.events.slice().reverse().map(renderEvent).join('') || '<div class="empty">暂无事件</div>'}</div></div>
+            <div class="card"><div class="card-header"><h2>事件</h2>
+              <span class="btn-group">
+                <span class="muted small" id="detail-ev-count">${eventLog.length}</span>
+                <button class="btn sm" type="button" id="ev-pause" aria-pressed="${evPaused ? 'true' : 'false'}">${evPaused ? `继续${evHeld.length ? ` (${evHeld.length})` : ''}` : '暂停'}</button>
+                <button class="btn sm" type="button" id="ev-export">导出</button>
+              </span></div>
+              <div class="feed${evPaused ? ' paused' : ''}" id="detail-feed">${eventLog.slice().reverse().map(renderEvent).join('') || '<div class="empty">暂无事件</div>'}</div></div>
           </div>
         </div>`;
       bindTree(main);
+      paintTreeFilter();
     };
     render();
     main.addEventListener('click', async (e) => {
@@ -603,6 +709,52 @@
       if (!b) return;
       const deleted = await handleTestAction(b.dataset.act, b.dataset.id);
       if (deleted) location.hash = '#/tests';
+    });
+    main.addEventListener('input', (e) => {
+      if (e.target.id !== 'tree-q') return;
+      treeQuery = e.target.value;
+      paintTreeFilter();
+    });
+    main.addEventListener('change', (e) => {
+      if (e.target.id !== 'tree-fail') return;
+      failOnly = e.target.checked;
+      paintTreeFilter();
+    });
+    main.addEventListener('beforematch', () => {
+      failOnly = false;
+      treeQuery = '';
+      const cb = $('#tree-fail', main); if (cb) cb.checked = false;
+      const q = $('#tree-q', main); if (q) q.value = '';
+      paintTreeFilter();
+    });
+    const flushHeld = (feed) => {
+      if (!feed || !evHeld.length) return;
+      if (feed.firstElementChild && feed.firstElementChild.classList.contains('empty')) feed.innerHTML = '';
+      evHeld.forEach((ev) => feed.insertAdjacentHTML('afterbegin', renderEvent(ev)));
+      evHeld = [];
+      const btn = $('#ev-pause', main);
+      if (btn && !evPaused) btn.textContent = '暂停';
+      const n = $('#detail-ev-count', main); if (n) n.textContent = eventLog.length;
+    };
+    main.addEventListener('click', (e) => {
+      if (e.target.id === 'ev-pause' || e.target.closest('#ev-pause')) {
+        evPaused = !evPaused;
+        const btn = $('#ev-pause', main);
+        if (btn) {
+          btn.setAttribute('aria-pressed', evPaused ? 'true' : 'false');
+          btn.textContent = evPaused ? `继续${evHeld.length ? ` (${evHeld.length})` : ''}` : '暂停';
+        }
+        const feed = $('#detail-feed', main);
+        if (feed) feed.classList.toggle('paused', evPaused);
+        if (!evPaused && evHeld.length) {
+          flushHeld(feed);
+        }
+        return;
+      }
+      if (e.target.id === 'ev-export' || e.target.closest('#ev-export')) {
+        downloadJson(`testhub-${id}-events.json`, eventLog);
+        toast('已导出事件 JSON', 'ok');
+      }
     });
 
     let timer = null, treeTimer = null;
@@ -617,16 +769,21 @@
     };
     const redrawTree = () => {
       if (result) return;
-      const tree = $('#result-tree', main);
-      if (tree) { tree.innerHTML = treeHtml(); bindTree(tree); }
+      const body = $('#tree-body', main);
+      if (body) { body.innerHTML = treeInner(); bindTree(body); paintTreeFilter(); }
     };
     const off = live.on((ev) => {
       if (ev.test_id !== id) return;
+      eventLog.push(ev);
       const feed = $('#detail-feed');
-      if (feed) {
+      if (evPaused) {
+        evHeld.push(ev);
+        const btn = $('#ev-pause', main);
+        if (btn) btn.textContent = `继续 (${evHeld.length})`;
+      } else if (feed) {
         if (feed.firstElementChild && feed.firstElementChild.classList.contains('empty')) feed.innerHTML = '';
         feed.insertAdjacentHTML('afterbegin', renderEvent(ev));
-        $('#detail-ev-count').textContent = feed.children.length;
+        const n = $('#detail-ev-count'); if (n) n.textContent = eventLog.length;
       }
       if (ev.event === 'test.completed' || ev.event === 'test.cancelled') { setTimeout(refresh, 150); return; }
       if (/^(spec|scenario|step)\./.test(ev.event)) {
@@ -916,9 +1073,17 @@
   routes.events = async (main) => {
     const data = await api('/events?limit=300');
     let filter = '';
-    main.innerHTML = `${header('事件流', '通过 WebSocket <code>/ws/v1/events</code> 实时推送的所有事件', `<button class="btn" id="clear-feed">清屏</button>`)}
-      <div class="toolbar"><input type="text" id="ev-filter" placeholder="按事件类型 / 测试 ID 过滤，例如 scenario 或 test-2024"><label class="check"><input type="checkbox" id="hide-steps"> 隐藏 step.* 事件</label><span class="muted small" id="ev-total">${data.events.length} 条</span></div>
-      <div class="card"><div class="feed" id="events-feed" style="max-height:calc(100vh - 220px)">${data.events.slice().reverse().map(renderEvent).join('') || '<div class="empty">暂无事件</div>'}</div></div>`;
+    let paused = false;
+    let held = [];
+    let items = (data.events || []).slice();
+    main.innerHTML = `${header('事件流', '通过 WebSocket <code>/ws/v1/events</code> 实时推送的所有事件', `<button class="btn" type="button" id="ev-pause" aria-pressed="false">暂停</button><button class="btn" type="button" id="ev-export">导出 JSON</button><button class="btn" type="button" id="clear-feed">清屏</button>`)}
+      <div class="toolbar">
+        <label class="grow" for="ev-filter"><span class="visually-hidden">过滤事件</span>
+          <input type="search" id="ev-filter" placeholder="按事件类型 / 测试 ID 过滤，例如 scenario 或 test-2024" autocomplete="off"></label>
+        <label class="check"><input type="checkbox" id="hide-steps"> 隐藏 step.* 事件</label>
+        <span class="muted small" id="ev-total">${items.length} 条</span>
+      </div>
+      <div class="card"><div class="feed" id="events-feed" style="max-height:calc(100vh - 220px)">${items.slice().reverse().map(renderEvent).join('') || '<div class="empty">暂无事件</div>'}</div></div>`;
     const feed = $('#events-feed');
     const apply = () => {
       const hideSteps = $('#hide-steps').checked;
@@ -928,15 +1093,39 @@
         el.style.display = (filter && !text.includes(filter)) || (hideSteps && isStep) ? 'none' : '';
       });
     };
+    const flush = () => {
+      if (!held.length) return;
+      if (feed.firstElementChild && feed.firstElementChild.classList.contains('empty')) feed.innerHTML = '';
+      held.forEach((ev) => feed.insertAdjacentHTML('afterbegin', renderEvent(ev)));
+      held = [];
+      apply();
+    };
     $('#ev-filter').addEventListener('input', (e) => { filter = e.target.value.toLowerCase(); apply(); });
     $('#hide-steps').addEventListener('change', apply);
-    $('#clear-feed').onclick = () => { feed.innerHTML = ''; };
-    let total = data.events.length;
+    $('#clear-feed').onclick = () => { feed.innerHTML = ''; items = []; held = []; $('#ev-total').textContent = '0 条'; };
+    $('#ev-export').onclick = () => { downloadJson('testhub-events.json', items); toast('已导出事件 JSON', 'ok'); };
+    $('#ev-pause').onclick = () => {
+      paused = !paused;
+      const btn = $('#ev-pause');
+      btn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+      btn.textContent = paused ? `继续${held.length ? ` (${held.length})` : ''}` : '暂停';
+      feed.classList.toggle('paused', paused);
+      if (!paused) {
+        flush();
+        btn.textContent = '暂停';
+      }
+    };
     const off = live.on((ev) => {
+      items.push(ev);
+      $('#ev-total').textContent = `${items.length} 条`;
+      if (paused) {
+        held.push(ev);
+        $('#ev-pause').textContent = `继续 (${held.length})`;
+        return;
+      }
       if (feed.firstElementChild && feed.firstElementChild.classList.contains('empty')) feed.innerHTML = '';
       feed.insertAdjacentHTML('afterbegin', renderEvent(ev));
       while (feed.children.length > 1000) feed.lastElementChild.remove();
-      $('#ev-total').textContent = `${++total} 条`;
       apply();
     });
     return off;
@@ -946,6 +1135,53 @@
   // 启动
   // ------------------------------------------------------------
   $('#auth-btn').addEventListener('click', () => auth.prompt().then((saved) => { if (saved) { if (auth.protectReads) live.reconnect(); navigate(); } }));
+  $('#shortcuts-btn').addEventListener('click', () => showShortcuts());
+  let goChord = null;
+  window.addEventListener('keydown', (e) => {
+    const el = e.target;
+    const typing = el && typeof el.closest === 'function' && (el.closest('input, textarea, select, [contenteditable="true"]') || (el.closest('dialog') && el.tagName !== 'DIALOG' && el.tagName !== 'BUTTON'));
+    if (e.key === 'Escape') {
+      const dlg = document.querySelector('dialog[open]');
+      if (dlg) { dlg.close(); e.preventDefault(); return; }
+      if (typing && el.blur) el.blur();
+      return;
+    }
+    if (document.querySelector('dialog[open]')) return;
+    if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
+      if (typing) return;
+      e.preventDefault();
+      showShortcuts();
+      return;
+    }
+    if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === '/') {
+      e.preventDefault();
+      const box = $('#tree-q') || $('#ev-filter') || $('input[type="search"]');
+      if (box) box.focus();
+      return;
+    }
+    if (e.key === 'f' || e.key === 'F') {
+      const cb = $('#tree-fail');
+      if (cb) { e.preventDefault(); cb.click(); }
+      return;
+    }
+    if (e.key === 'p' || e.key === 'P') {
+      const btn = $('#ev-pause');
+      if (btn) { e.preventDefault(); btn.click(); }
+      return;
+    }
+    if (e.key === 'g') {
+      goChord = Date.now();
+      return;
+    }
+    if (goChord && Date.now() - goChord < 800) {
+      goChord = null;
+      const map = { d: '#/dashboard', h: '#/dashboard', r: '#/run', t: '#/tests', s: '#/specs', n: '#/runner', e: '#/events' };
+      if (map[e.key]) { e.preventDefault(); location.hash = map[e.key]; }
+    } else {
+      goChord = null;
+    }
+  });
   auth.render();
   api('/health').then((h) => {
     $('#brand-version').textContent = 'v' + h.version;

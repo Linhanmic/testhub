@@ -31,6 +31,8 @@ node_modules/
 
 # Playwright MCP 浏览器测试产物
 .playwright-mcp/
+/*.png
+/*.mp4
 
 # 运行时数据（结果持久化）
 data/

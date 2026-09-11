@@ -152,7 +152,7 @@ http.get("/api/v1/hello/{name}", [this](const HttpRequest& req) {
 ## 6. 调试技巧
 
 - `--log-level debug` 会打印每个 HTTP 请求、Runner 收发的每条 JSON 消息与事件派发；
-- `GET /api/v1/events?limit=500` 或 UI 的"事件流"页面可回放最近事件；
+- `GET /api/v1/events?limit=500` 或 UI 的"事件流"页面可回放最近事件；详情页与事件流支持暂停缓冲和导出 JSON。按 `?` 查看键盘快捷键。
 - Web UI 的规范页会用 `GET /api/v1/runner/steps` 标出 Runner 未实现的步骤；
 - Python Runner 可单独调试：`python3 runners/python/testhub_runner.py --impl-dir runners/python/step_impl --list-steps`；
 - Node.js Runner 可单独调试：`node runners/node/testhub_runner.js --impl-dir runners/node/step_impl --list-steps`；

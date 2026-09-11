@@ -20,7 +20,7 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 | Runner | 跨平台子进程桥接 + JSON-lines 协议；内置 mock Runner；**Python** 与 **Node.js** 两个参考 Runner（步骤注册、钩子、数据表、消息；Node 支持 async 步骤），同一套 .spec 可互换执行；**Runner 池**：默认每个并发测试独占一个进程，`parallel_streams` 可让一个测试占用多个进程；进程逐个自愈、按需重启 |
 | 服务端 | 多线程 HTTP/1.1（keep-alive、流水线、Content-Length、超时、`{param}` 路由、CORS、HEAD/OPTIONS、ETag 静态资源、SPA 回退） |
 | 实时性 | 异步事件总线；`/ws/v1/events` WebSocket 推送（按类型/测试 ID 订阅、历史回放） |
-| Web UI | 内嵌单页应用：总览、提交测试、测试记录、结果树、运行中实时执行树、规范浏览/编辑/校验、Runner 状态、事件流、暗色模式 |
+| Web UI | 内嵌单页应用：总览、提交测试、测试记录、结果树（搜索 / 只看失败）、运行中实时执行树、规范浏览/编辑/校验、Runner 状态、事件流（暂停 / 导出）、键盘快捷键、暗色模式 |
 | 质量 | 78 个单元测试 + 19 个 HTTP/WS 集成测试 + 7 个 Python 协议测试 + 12 个 Node.js 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
 
 ## 快速开始
