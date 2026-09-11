@@ -216,6 +216,7 @@
 - API：`GET /api/v1/trends?spec=&limit=`（默认 50、上限 200）；`GET /api/v1/tests/{id}/compare?with=`（缺基线 404，自己比自己 400）
 - UI：导航「结果趋势」、总览 sparkline、详情「与上次对比」；SVG 曲线用 `<figure>` + `role="img"` + 数据表，无 Chart.js；快捷键 `g` `a`
 - 测试：趋势纯函数 3 + 引擎自动基线 1 单元；集成两次 login.spec 后 trends/compare。合计 130（90+21+7+12）
+- 浏览器实测：总览「通过率趋势」sparkline；`#/trends` 按规范卡片（通过率/耗时曲线 + 点数表），筛选 `login.spec` 只留一张；详情「与上次对比」对 trend-demo 修复后显示改善 1 / 未变 1；快捷键 `g` `a` 进入趋势页
 
 ---
 
