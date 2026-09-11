@@ -1,371 +1,706 @@
 /*
- * TestHub - Runner Bridge Implementation
+ * TestHub - Runner 桥接实现（Runner 池）
  */
 
 #include "runner_bridge.h"
-#include "../util/string_util.h"
+#include "mock_runner.h"
+#include "process_runner.h"
+#include "../util/logger.h"
 
-#include <iostream>
-#include <sstream>
-#include <chrono>
+#include <algorithm>
+#include <cstdlib>
+#include <filesystem>
 #include <thread>
+#include <vector>
+
+#ifndef _WIN32
+#include <unistd.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace testhub {
 
-RunnerProcess::RunnerProcess() = default;
-RunnerProcess::~RunnerProcess() { stop(); }
+namespace {
 
-bool RunnerProcess::start(const std::string& command, const std::string& workingDir) {
+// 当前线程持有的会话所绑定的桥接与槽位
+thread_local RunnerBridge* tlsBridge = nullptr;
+thread_local int tlsSlot = -1;
+
+std::string executableDir() {
 #ifdef _WIN32
-    SECURITY_ATTRIBUTES sa;
-    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-    sa.bInheritHandle = TRUE;
-    sa.lpSecurityDescriptor = NULL;
-
-    if (!createPipes()) return false;
-
-    STARTUPINFOA si;
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = stdoutWrite_;
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-    si.dwFlags |= STARTF_USESTDHANDLES;
-
-    PROCESS_INFORMATION pi;
-    ZeroMemory(&pi, sizeof(pi));
-
-    std::string cmdLine = command;
-    if (CreateProcessA(NULL, (LPSTR)cmdLine.c_str(), NULL, NULL, TRUE, 0, NULL,
-                       workingDir.empty() ? NULL : workingDir.c_str(), &si, &pi)) {
-        processHandle_ = pi.hProcess;
-        pid_ = pi.dwProcessId;
-        running_ = true;
-        CloseHandle(pi.hThread);
-        return true;
-    }
-    closePipes();
-    return false;
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return "";
+    return std::filesystem::path(std::string(buf, n)).parent_path().string();
 #else
-    return false;
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return "";
+    buf[n] = '\0';
+    return std::filesystem::path(buf).parent_path().string();
 #endif
 }
 
-void RunnerProcess::stop() {
+std::string quoteShell(const std::string& s) {
 #ifdef _WIN32
-    if (processHandle_) {
-        TerminateProcess(processHandle_, 0);
-        WaitForSingleObject(processHandle_, 5000);
-        CloseHandle(processHandle_);
-        processHandle_ = NULL;
+    if (s.find_first_of(" \t\"") == std::string::npos) return s;
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"') out += "\\\"";
+        else out.push_back(c);
     }
-    closePipes();
+    out.push_back('"');
+    return out;
+#else
+    if (s.find_first_of(" \t\"'$`\\") == std::string::npos) return s;
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') out += "'\\''";
+        else out.push_back(c);
+    }
+    out += "'";
+    return out;
 #endif
-    running_ = false;
-    pid_ = 0;
 }
 
-bool RunnerProcess::isRunning() const {
-    if (!running_ || pid_ == 0) return false;
+std::string pythonLauncher() {
 #ifdef _WIN32
-    if (processHandle_) {
-        DWORD exitCode;
-        if (GetExitCodeProcess(processHandle_, &exitCode)) {
-            return exitCode == STILL_ACTIVE;
+    return "python";
+#else
+    return "python3";
+#endif
+}
+
+/**
+ * 在若干候选目录中查找随 TestHub 发布的 runner 脚本
+ */
+std::string locateBundledRunner(const std::string& relative) {
+    std::vector<std::string> roots;
+    if (const char* home = std::getenv("TESTHUB_HOME")) {
+        if (*home) {
+            roots.push_back(home);
+            roots.push_back((std::filesystem::path(home) / "share" / "testhub").string());
         }
     }
-#endif
-    return false;
-}
-
-bool RunnerProcess::sendMessage(const std::string& message) {
-#ifdef _WIN32
-    if (!stdinWrite_) return false;
-    DWORD written;
-    std::string data = message + "\n";
-    return WriteFile(stdinWrite_, data.c_str(), data.length(), &written, NULL);
-#else
-    return false;
-#endif
-}
-
-std::string RunnerProcess::receiveMessage(int timeout) {
-#ifdef _WIN32
-    if (!stdoutRead_) return "";
-    DWORD available;
-    if (!PeekNamedPipe(stdoutRead_, NULL, 0, NULL, &available, NULL) || available == 0) {
-        auto start = std::chrono::steady_clock::now();
-        while (true) {
-            if (!PeekNamedPipe(stdoutRead_, NULL, 0, NULL, &available, NULL) || available > 0) break;
-            auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() >= timeout) return "";
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::string exeDir = executableDir();
+    if (!exeDir.empty()) {
+        roots.push_back(exeDir);
+        roots.push_back((std::filesystem::path(exeDir) / "..").string());
+        roots.push_back((std::filesystem::path(exeDir) / ".." / "share" / "testhub").string());
+    }
+    roots.push_back(".");
+    for (const auto& root : roots) {
+        std::filesystem::path candidate = std::filesystem::path(root) / relative;
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(candidate, ec)) {
+            return std::filesystem::weakly_canonical(candidate, ec).string();
         }
     }
-    char buffer[4096];
-    DWORD bytesRead;
-    if (ReadFile(stdoutRead_, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
-        buffer[bytesRead] = '\0';
-        return std::string(buffer, bytesRead);
-    }
-#endif
     return "";
 }
 
-bool RunnerProcess::createPipes() {
-#ifdef _WIN32
-    SECURITY_ATTRIBUTES sa;
-    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-    sa.bInheritHandle = TRUE;
-    sa.lpSecurityDescriptor = NULL;
-    if (!CreatePipe(&stdinRead_, &stdinWrite_, &sa, 0)) return false;
-    SetHandleInformation(stdinWrite_, HANDLE_FLAG_INHERIT, 0);
-    if (!CreatePipe(&stdoutRead_, &stdoutWrite_, &sa, 0)) { closePipes(); return false; }
-    SetHandleInformation(stdoutRead_, HANDLE_FLAG_INHERIT, 0);
-    return true;
-#else
-    return false;
-#endif
+std::string slotTag(int index) { return "runner#" + std::to_string(index); }
+
+} // namespace
+
+// ============================================================
+// Session
+// ============================================================
+
+RunnerBridge::Session::Session(RunnerBridge* bridge, int slot)
+    : bridge_(bridge), slot_(slot), prevBridge_(tlsBridge), prevSlot_(tlsSlot) {
+    tlsBridge = bridge;
+    tlsSlot = slot;
 }
 
-void RunnerProcess::closePipes() {
-#ifdef _WIN32
-    if (stdinRead_) { CloseHandle(stdinRead_); stdinRead_ = NULL; }
-    if (stdinWrite_) { CloseHandle(stdinWrite_); stdinWrite_ = NULL; }
-    if (stdoutRead_) { CloseHandle(stdoutRead_); stdoutRead_ = NULL; }
-    if (stdoutWrite_) { CloseHandle(stdoutWrite_); stdoutWrite_ = NULL; }
-#endif
+RunnerBridge::Session::Session(Session&& other) noexcept
+    : bridge_(other.bridge_), slot_(other.slot_), prevBridge_(other.prevBridge_), prevSlot_(other.prevSlot_) {
+    other.bridge_ = nullptr;
+    other.slot_ = -1;
 }
+
+RunnerBridge::Session& RunnerBridge::Session::operator=(Session&& other) noexcept {
+    if (this != &other) {
+        release();
+        bridge_ = other.bridge_;
+        slot_ = other.slot_;
+        prevBridge_ = other.prevBridge_;
+        prevSlot_ = other.prevSlot_;
+        other.bridge_ = nullptr;
+        other.slot_ = -1;
+    }
+    return *this;
+}
+
+RunnerBridge::Session::~Session() { release(); }
+
+void RunnerBridge::Session::release() {
+    if (!bridge_) return;
+    tlsBridge = prevBridge_;
+    tlsSlot = prevSlot_;
+    bridge_->releaseSlot(slot_);
+    bridge_ = nullptr;
+    slot_ = -1;
+}
+
+// ============================================================
+// 生命周期
+// ============================================================
 
 RunnerBridge::RunnerBridge() = default;
 RunnerBridge::~RunnerBridge() { stopRunner(); }
 
-bool RunnerBridge::startRunner(const std::string& language, const std::string& projectPath) {
+void RunnerBridge::setRunnerFactory(RunnerFactory factory) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (state_ == RunnerState::CONNECTED || state_ == RunnerState::CONNECTING) return true;
-    language_ = language;
-    projectPath_ = projectPath;
-    state_ = RunnerState::CONNECTING;
-    publishRunnerEvent(EventType::RUNNER_CONNECTED, "Connecting to " + language + " runner...");
-    std::string command = getRunnerCommand(language);
-    process_ = std::make_unique<RunnerProcess>();
-    if (!process_->start(command, projectPath)) {
-        state_ = RunnerState::RUNNER_ERROR;
-        publishRunnerEvent(EventType::RUNNER_ERROR, "Failed to start runner process");
-        return false;
+    factory_ = std::move(factory);
+}
+
+std::string RunnerBridge::defaultCommandForLanguage(const std::string& language) {
+    if (const char* env = std::getenv("TESTHUB_RUNNER_CMD")) {
+        if (*env) return env;
     }
-    stopReceiving_ = false;
-    receiveThread_ = std::thread(&RunnerBridge::receiveLoop, this);
-    stopHeartbeat_ = false;
-    heartbeatThread_ = std::thread(&RunnerBridge::heartbeatLoop, this);
-    state_ = RunnerState::CONNECTED;
-    publishRunnerEvent(EventType::RUNNER_CONNECTED, language + " runner connected");
-    return true;
+    if (language == "python" || language == "py") {
+        std::string script = locateBundledRunner("runners/python/testhub_runner.py");
+        if (!script.empty()) return pythonLauncher() + " " + quoteShell(script);
+        return pythonLauncher() + " -m testhub_runner";
+    }
+    if (language == "node" || language == "js" || language == "javascript" || language == "nodejs") {
+        std::string script = locateBundledRunner("runners/node/testhub_runner.js");
+        if (!script.empty()) return "node " + quoteShell(script);
+        return "node testhub_runner.js";
+    }
+    if (language == "mock" || language == "none" || language.empty()) return "";
+    return "testhub-runner-" + language;
+}
+
+std::unique_ptr<Runner> RunnerBridge::createRunner(int slotIndex) {
+    if (factory_) return factory_();
+    if (config_.language == "mock" || config_.language == "none" || config_.language.empty()) {
+        if (config_.command.empty()) return std::make_unique<MockRunner>(config_.mockDelayMs);
+    }
+    std::string command = config_.command.empty() ? defaultCommandForLanguage(config_.language) : config_.command;
+    if (command.empty()) return std::make_unique<MockRunner>(config_.mockDelayMs);
+
+    std::map<std::string, std::string> env = config_.env;
+    env["TESTHUB_RUNNER_INDEX"] = std::to_string(slotIndex);
+    env["TESTHUB_RUNNER_POOL_SIZE"] = std::to_string(static_cast<int>(slots_.size()));
+    auto runner = std::make_unique<ProcessRunner>(command, config_.workingDir, env);
+    runner->setStartupTimeout(config_.connectionTimeoutMs);
+    std::string language = config_.language;
+    bool pooled = slots_.size() > 1;
+    runner->setLogCallback([slotIndex, language, pooled](const std::string& level, const std::string& message) {
+        TH_LOG_INFO("runner", (pooled ? "[#" + std::to_string(slotIndex) + "] " : std::string()) + "[" + level + "] " + message);
+        publishEvent(EventType::RUNNER_LOG, "", {{"level", level}, {"message", message}, {"language", language},
+                                                 {"slot", std::to_string(slotIndex)}});
+    });
+    return runner;
+}
+
+void RunnerBridge::publish(const std::string& type, const std::string& detail, int slotIndex) {
+    publishEvent(type, "", {{"language", config_.language}, {"detail", detail}, {"slot", std::to_string(slotIndex)}});
+}
+
+bool RunnerBridge::start(const RunnerConfig& config) {
+    std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
+    for (const auto& slot : slots_) {
+        if (slot->state == RunnerState::CONNECTED || slot->state == RunnerState::BUSY) return true;
+    }
+    draining_ = true;
+    waitForIdle(lock);
+
+    config_ = config;
+    int size = std::clamp(config.poolSize, 1, kMaxPoolSize);
+    concurrencySafe_ = false;
+    slots_.clear();
+    for (int i = 0; i < size; ++i) {
+        auto slot = std::make_unique<Slot>();
+        slot->index = i;
+        slots_.push_back(std::move(slot));
+    }
+    startAllSlots(lock, false);
+
+    bool anyConnected = false;
+    for (const auto& slot : slots_) anyConnected = anyConnected || slot->state == RunnerState::CONNECTED;
+    if (slots_.size() > 1) {
+        TH_LOG_INFO("runner", "Runner pool started with " + std::to_string(slots_.size()) + " " + config_.language + " runners");
+    }
+    draining_ = false;
+    slotCv_.notify_all();
+    return anyConnected;
+}
+
+bool RunnerBridge::startRunner(const std::string& language, const std::string& projectPath) {
+    RunnerConfig cfg;
+    cfg.language = language;
+    cfg.workingDir = projectPath;
+    return start(cfg);
+}
+
+bool RunnerBridge::startSlot(Slot& slot, std::unique_ptr<Runner> probe) {
+    // 调用方保证此时没有其他线程会替换 slot.runner（槽位被独占，或池处于排空状态）
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        slot.state = RunnerState::CONNECTING;
+        slot.restarting = true;
+    }
+    publish(EventType::RUNNER_CONNECTING, "Starting " + config_.language + " runner", slot.index);
+
+    std::shared_ptr<Runner> runner = probe ? std::shared_ptr<Runner>(std::move(probe)) : createRunner(slot.index);
+    bool ok = runner->start();
+    std::string error;
+    if (!ok) {
+        auto* pr = dynamic_cast<ProcessRunner*>(runner.get());
+        error = pr ? pr->lastError() : "Failed to start runner";
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (ok) {
+            slot.runner = runner;
+            slot.state = RunnerState::CONNECTED;
+            slot.startedAt = TimeUtil::now();
+            slot.lastHeartbeat = slot.startedAt;
+            slot.lastError.clear();
+        } else {
+            slot.runner.reset();
+            slot.state = RunnerState::RUNNER_ERROR;
+            slot.lastError = error;
+        }
+        slot.restarting = false;
+    }
+    slotCv_.notify_all();
+    if (ok) publish(EventType::RUNNER_CONNECTED, runner->name() + " connected", slot.index);
+    else publish(EventType::RUNNER_ERROR, error, slot.index);
+    return ok;
+}
+
+void RunnerBridge::startAllSlots(std::unique_lock<std::mutex>& lock, bool restart) {
+    // 前置条件：持有 lock，池已排空（没有活动会话）
+    if (slots_.empty()) return;
+    if (restart) {
+        for (auto& slot : slots_) ++slot->restartCount;
+    }
+    Slot* first = slots_[0].get();
+    lock.unlock();
+    // 先启动首个 Runner 以探测其并发安全性：并发安全的 Runner 无需多进程
+    std::unique_ptr<Runner> probe = createRunner(0);
+    bool safe = probe->isConcurrencySafe();
+    startSlot(*first, std::move(probe));
+    lock.lock();
+    if (safe) {
+        concurrencySafe_ = true;
+        if (slots_.size() > 1) slots_.resize(1);
+        return;
+    }
+    if (slots_.size() == 1) return;
+
+    std::vector<Slot*> rest;
+    for (size_t i = 1; i < slots_.size(); ++i) rest.push_back(slots_[i].get());
+    lock.unlock();
+    std::vector<std::thread> starters;
+    starters.reserve(rest.size());
+    for (Slot* slot : rest) starters.emplace_back([this, slot] { startSlot(*slot); });
+    for (auto& t : starters) t.join();
+    lock.lock();
+}
+
+void RunnerBridge::stopAllSlots(std::unique_lock<std::mutex>& lock) {
+    // 前置条件：持有 lock，池已排空
+    std::vector<std::shared_ptr<Runner>> runners;
+    std::vector<int> stopped;
+    for (auto& slot : slots_) {
+        if (slot->runner) runners.push_back(std::move(slot->runner));
+        slot->runner.reset();
+        if (slot->state != RunnerState::DISCONNECTED) {
+            slot->state = RunnerState::DISCONNECTED;
+            stopped.push_back(slot->index);
+        }
+    }
+    lock.unlock();
+    if (runners.size() > 1) {
+        std::vector<std::thread> stoppers;
+        for (auto& r : runners) stoppers.emplace_back([r] { r->stop(); });
+        for (auto& t : stoppers) t.join();
+    } else {
+        for (auto& r : runners) r->stop();
+    }
+    for (int index : stopped) publish(EventType::RUNNER_DISCONNECTED, "Runner stopped", index);
+    lock.lock();
+}
+
+void RunnerBridge::waitForIdle(std::unique_lock<std::mutex>& lock) {
+    slotCv_.wait(lock, [&] {
+        for (const auto& slot : slots_) {
+            if (slot->users > 0 || slot->restarting) return false;
+        }
+        return true;
+    });
 }
 
 void RunnerBridge::stopRunner() {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (state_ == RunnerState::DISCONNECTED) return;
-        stopReceiving_ = true;
-        if (receiveThread_.joinable()) receiveThread_.join();
-        stopHeartbeat_ = true;
-        if (heartbeatThread_.joinable()) heartbeatThread_.join();
-        if (process_) { process_->stop(); process_.reset(); }
-        state_ = RunnerState::DISCONNECTED;
-    }
-    publishRunnerEvent(EventType::RUNNER_DISCONNECTED, "Runner disconnected");
+    std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (slots_.empty()) return;
+    draining_ = true;
+    waitForIdle(lock);
+    stopAllSlots(lock);
+    draining_ = false;
+    slotCv_.notify_all();
 }
 
 bool RunnerBridge::restartRunner() {
-    stopRunner();
-    return startRunner(language_, projectPath_);
+    std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (slots_.empty()) return false;
+    draining_ = true;
+    waitForIdle(lock);
+    stopAllSlots(lock);
+    startAllSlots(lock, true);
+    bool allConnected = true;
+    for (const auto& slot : slots_) allConnected = allConnected && slot->state == RunnerState::CONNECTED;
+    draining_ = false;
+    slotCv_.notify_all();
+    return allConnected;
 }
 
+// ============================================================
+// 槽位分配
+// ============================================================
+
+void RunnerBridge::releaseSlot(int index) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (index >= 0 && static_cast<size_t>(index) < slots_.size() && slots_[static_cast<size_t>(index)]->users > 0) {
+            --slots_[static_cast<size_t>(index)]->users;
+        }
+    }
+    slotCv_.notify_all();
+}
+
+RunnerBridge::Session RunnerBridge::acquireSession() {
+    std::vector<int> slots = reserveSlots(1);
+    if (slots.empty()) return Session();
+    return Session(this, slots[0]);
+}
+
+RunnerBridge::Session RunnerBridge::attachReserved(int slotIndex) {
+    return Session(this, slotIndex);
+}
+
+std::vector<int> RunnerBridge::reserveSlots(int n) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return reserveSlotsLocked(lock, n);
+}
+
+std::vector<int> RunnerBridge::reserveSlotsLocked(std::unique_lock<std::mutex>& lock, int n) {
+    if (n < 1) n = 1;
+    if (slots_.empty()) return {};
+    if (concurrencySafe_) {
+        slotCv_.wait(lock, [&] { return !draining_ && !slots_.empty(); });
+        if (slots_.empty()) return {};
+        slots_[0]->users += n;
+        return std::vector<int>(static_cast<size_t>(n), 0);
+    }
+    if (n > static_cast<int>(slots_.size())) n = static_cast<int>(slots_.size());
+    auto usable = [&](const Slot& s) {
+        return s.state != RunnerState::RUNNER_ERROR || (config_.autoRestart && s.restartCount < config_.maxRestarts);
+    };
+    std::vector<int> chosen;
+    slotCv_.wait(lock, [&] {
+        if (draining_ || slots_.empty()) return false;
+        chosen.clear();
+        std::vector<int> connected, freeUsable, freeAny;
+        bool anyUsable = false;
+        for (const auto& slot : slots_) {
+            bool ok = usable(*slot);
+            anyUsable = anyUsable || ok;
+            if (slot->users > 0) continue;
+            freeAny.push_back(slot->index);
+            if (ok) {
+                freeUsable.push_back(slot->index);
+                if (slot->state == RunnerState::CONNECTED) connected.push_back(slot->index);
+            }
+        }
+        if (static_cast<int>(connected.size()) >= n) {
+            chosen.assign(connected.begin(), connected.begin() + n);
+            return true;
+        }
+        if (static_cast<int>(freeUsable.size()) >= n) {
+            chosen.assign(freeUsable.begin(), freeUsable.begin() + n);
+            return true;
+        }
+        if (!anyUsable && static_cast<int>(freeAny.size()) >= n) {
+            chosen.assign(freeAny.begin(), freeAny.begin() + n);
+            return true;
+        }
+        return false;
+    });
+    if (chosen.empty()) return {};
+    for (int index : chosen) slots_[static_cast<size_t>(index)]->users = 1;
+    return chosen;
+}
+
+RunnerBridge::Slot* RunnerBridge::boundSlot() {
+    if (tlsBridge != this || tlsSlot < 0) return nullptr;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (static_cast<size_t>(tlsSlot) >= slots_.size()) return nullptr;
+    return slots_[static_cast<size_t>(tlsSlot)].get();
+}
+
+int RunnerBridge::poolSize() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return slots_.empty() ? 1 : static_cast<int>(slots_.size());
+}
+
+bool RunnerBridge::isConcurrencySafe() const {
+    return concurrencySafe_.load();
+}
+
+// ============================================================
+// 状态
+// ============================================================
+
 bool RunnerBridge::isConnected() const {
-    return state_ == RunnerState::CONNECTED || state_ == RunnerState::BUSY;
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& slot : slots_) {
+        if ((slot->state == RunnerState::CONNECTED || slot->state == RunnerState::BUSY) && slot->runner && slot->runner->isAlive()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::shared_ptr<Runner> RunnerBridge::anyAliveRunner() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& slot : slots_) {
+        if (slot->state == RunnerState::CONNECTED && slot->runner && slot->runner->isAlive()) return slot->runner;
+    }
+    return nullptr;
 }
 
 RunnerStatus RunnerBridge::getStatus() const {
-    std::lock_guard<std::mutex> lock(mutex_);
     RunnerStatus status;
-    status.state = state_;
-    status.language = language_;
-    status.pid = process_ ? process_->getPid() : 0;
-    status.lastHeartbeat = std::chrono::system_clock::now();
+    std::shared_ptr<Runner> stepsSource;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        status.language = config_.language;
+        status.command = config_.command.empty() ? defaultCommandForLanguage(config_.language) : config_.command;
+        if (status.command.empty()) status.command = "builtin:mock";
+        status.poolSize = slots_.empty() ? 1 : static_cast<int>(slots_.size());
+
+        bool anyConnecting = false, anyError = false;
+        std::string errorFromDead;
+        for (const auto& slot : slots_) {
+            RunnerSlotStatus ss;
+            ss.index = slot->index;
+            bool alive = slot->runner && slot->runner->isAlive();
+            ss.state = slot->state;
+            ss.lastError = slot->lastError;
+            if (ss.state == RunnerState::CONNECTED && !alive) {
+                // 进程在两次使用之间退出：槽位按需重启（下次被分配时），此处只报告事实
+                ss.state = RunnerState::RUNNER_ERROR;
+                if (ss.lastError.empty()) {
+                    ss.lastError = config_.autoRestart && slot->restartCount < config_.maxRestarts
+                                       ? "Runner process exited (will be restarted on next use)"
+                                       : "Runner process exited";
+                }
+            }
+            ss.busy = slot->users > 0;
+            if (alive && ss.busy) ss.state = RunnerState::BUSY;
+            ss.pid = slot->runner ? slot->runner->pid() : 0;
+            ss.version = slot->runner ? slot->runner->version() : "";
+            ss.restartCount = slot->restartCount;
+            ss.stepsExecuted = slot->stepsExecuted;
+            ss.startedAt = slot->startedAt;
+            ss.lastHeartbeat = slot->lastHeartbeat;
+
+            if (alive) {
+                ++status.aliveCount;
+                if (ss.busy) ++status.busyCount;
+                if (!stepsSource) {
+                    stepsSource = slot->runner;
+                    status.pid = ss.pid;
+                    status.version = ss.version;
+                    status.startedAt = ss.startedAt;
+                }
+            }
+            anyConnecting = anyConnecting || ss.state == RunnerState::CONNECTING;
+            if (ss.state == RunnerState::RUNNER_ERROR) {
+                anyError = true;
+                if (errorFromDead.empty()) errorFromDead = ss.lastError.empty() ? "Runner is not alive" : ss.lastError;
+            }
+            status.restartCount += slot->restartCount;
+            if (slot->lastHeartbeat > status.lastHeartbeat) status.lastHeartbeat = slot->lastHeartbeat;
+            if (status.lastError.empty()) status.lastError = slot->lastError;
+            status.slots.push_back(std::move(ss));
+        }
+        if (!errorFromDead.empty()) status.lastError = errorFromDead;
+
+        if (status.aliveCount > 0) status.state = status.busyCount > 0 ? RunnerState::BUSY : RunnerState::CONNECTED;
+        else if (anyConnecting) status.state = RunnerState::CONNECTING;
+        else if (anyError) status.state = RunnerState::RUNNER_ERROR;
+        else status.state = RunnerState::DISCONNECTED;
+    }
+    if (stepsSource) {
+        // 只用缓存：向正在 execute_step 的进程发 get_steps 会与步骤里访问本进程 HTTP 互相等待
+        for (const auto& s : stepsSource->cachedSteps()) status.implementedSteps.push_back(s.parameterizedStepText);
+    }
     return status;
 }
 
-StepResult RunnerBridge::executeStep(const std::string& stepText, const std::vector<std::string>& args) {
-    StepResult result;
-    result.stepText = stepText;
-    if (!isConnected()) {
-        result.state = TestState::TEST_ERROR;
-        result.errorMessage = "Runner not connected";
-        return result;
+// ============================================================
+// 执行
+// ============================================================
+
+bool RunnerBridge::ensureAlive(Slot& slot) {
+    // 调用方持有该槽位（独占会话；共享模式下用 restarting 标志避免重复重启）
+    std::unique_lock<std::mutex> lock(mutex_);
+    slotCv_.wait(lock, [&] { return !slot.restarting; });
+    if (slot.runner && slot.runner->isAlive()) return true;
+    if (!config_.autoRestart) {
+        if (slot.state != RunnerState::DISCONNECTED) {
+            slot.state = RunnerState::RUNNER_ERROR;
+            slot.lastError = "Runner is not alive";
+        }
+        return false;
     }
-    RunnerMessage message;
-    message.type = RunnerMessageType::ExecuteStep;
-    message.id = ++messageIdCounter_;
-    std::ostringstream payload;
-    payload << "{\"stepText\":\"" << stepText << "\",\"args\":[";
-    for (size_t i = 0; i < args.size(); ++i) {
-        if (i > 0) payload << ",";
-        payload << "\"" << args[i] << "\"";
+    if (slot.restartCount >= config_.maxRestarts) {
+        std::string error = "Runner restart limit reached (" + std::to_string(config_.maxRestarts) + ")";
+        bool changed = slot.lastError != error;
+        slot.state = RunnerState::RUNNER_ERROR;
+        slot.lastError = error;
+        lock.unlock();
+        if (changed) publish(EventType::RUNNER_ERROR, error, slot.index);
+        return false;
     }
-    payload << "]}";
-    message.payload = payload.str();
-    auto start = std::chrono::steady_clock::now();
-    RunnerResponse response = sendAndWait(message, 60000);
-    auto end = std::chrono::steady_clock::now();
-    result.duration = std::chrono::duration<double>(end - start).count();
-    if (response.success) {
-        result.state = TestState::PASSED;
-    } else {
-        result.state = TestState::FAILED;
-        result.errorMessage = response.error;
+    ++slot.restartCount;
+    slot.restarting = true;
+    std::shared_ptr<Runner> old = std::move(slot.runner);
+    slot.runner.reset();
+    slot.state = RunnerState::CONNECTING;
+    int attempt = slot.restartCount;
+    lock.unlock();
+
+    TH_LOG_WARN("runner", slotTag(slot.index) + " not alive; restarting (attempt " + std::to_string(attempt) + ")");
+    if (old) old->stop();
+    return startSlot(slot);
+}
+
+StepResult RunnerBridge::executeStep(const StepExecutionRequest& request) {
+    Session temp;
+    Slot* slot = boundSlot();
+    if (!slot) {
+        temp = acquireSession();
+        if (temp.active()) slot = boundSlot();
     }
+    auto failed = [&](const std::string& message) {
+        StepResult r;
+        r.stepText = request.stepText;
+        r.parameterizedText = request.parameterizedText;
+        r.state = TestState::TEST_ERROR;
+        r.errorMessage = message;
+        return r;
+    };
+    if (!slot) return failed("Runner not available");
+    if (!ensureAlive(*slot)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return failed(slot->lastError.empty() ? "Runner not connected" : slot->lastError);
+    }
+
+    std::shared_ptr<Runner> runner;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        runner = slot->runner;
+    }
+    StepExecutionRequest req = request;
+    if (req.timeoutMs <= 0) req.timeoutMs = config_.requestTimeoutMs;
+    StepResult result = runner->executeStep(req);
+
+    std::string died;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        slot->lastHeartbeat = TimeUtil::now();
+        ++slot->stepsExecuted;
+        if (slot->runner == runner && !runner->isAlive()) {
+            slot->state = RunnerState::RUNNER_ERROR;
+            slot->lastError = result.errorMessage.empty() ? "Runner died" : result.errorMessage;
+            died = slot->lastError;
+        }
+    }
+    if (!died.empty()) publish(EventType::RUNNER_ERROR, died, slot->index);
     return result;
 }
 
-std::vector<StepValue> RunnerBridge::getAllSteps() {
-    std::vector<StepValue> steps;
-    if (!isConnected()) return steps;
-    RunnerMessage message;
-    message.type = RunnerMessageType::AllSteps;
-    message.id = ++messageIdCounter_;
-    message.payload = "{}";
-    RunnerResponse response = sendAndWait(message);
-    return steps;
-}
-
-bool RunnerBridge::cacheFile(const CacheFileRequest& request) {
-    if (!isConnected()) return false;
-    RunnerMessage message;
-    message.type = RunnerMessageType::CacheFile;
-    message.id = ++messageIdCounter_;
-    std::ostringstream payload;
-    payload << "{\"filePath\":\"" << request.filePath << "\",\"content\":\"" << request.content << "\",\"status\":";
-    switch (request.status) {
-        case CacheFileRequest::Status::OPENED: payload << "\"OPENED\""; break;
-        case CacheFileRequest::Status::CHANGED: payload << "\"CHANGED\""; break;
-        case CacheFileRequest::Status::CLOSED: payload << "\"CLOSED\""; break;
-        case CacheFileRequest::Status::CREATED: payload << "\"CREATED\""; break;
-        case CacheFileRequest::Status::DELETED: payload << "\"DELETED\""; break;
-    }
-    payload << "}";
-    message.payload = payload.str();
-    RunnerResponse response = sendAndWait(message);
-    return response.success;
-}
-
-std::vector<std::pair<int, std::string>> RunnerBridge::getStepPositions(const std::string& filePath) {
-    std::vector<std::pair<int, std::string>> positions;
-    if (!isConnected()) return positions;
-    RunnerMessage message;
-    message.type = RunnerMessageType::StepPositions;
-    message.id = ++messageIdCounter_;
-    message.payload = "{\"filePath\":\"" + filePath + "\"}";
-    RunnerResponse response = sendAndWait(message);
-    return positions;
-}
-
-std::vector<std::string> RunnerBridge::getImplementationFiles() {
-    std::vector<std::string> files;
-    if (!isConnected()) return files;
-    RunnerMessage message;
-    message.type = RunnerMessageType::ImplementationFileList;
-    message.id = ++messageIdCounter_;
-    message.payload = "{}";
-    RunnerResponse response = sendAndWait(message);
-    return files;
-}
-
-RunnerResponse RunnerBridge::sendAndWait(const RunnerMessage& message, int timeout) {
-    int msgId = sendMessage(message);
-    auto start = std::chrono::steady_clock::now();
-    while (true) {
+HookResult RunnerBridge::runHook(HookType type, const ExecutionContext& context) {
+    auto runOn = [&](Slot& slot) {
+        HookResult r;
+        if (!ensureAlive(slot)) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            r.success = false;
+            r.errorMessage = slot.lastError.empty() ? "Runner not connected" : slot.lastError;
+            return r;
+        }
+        std::shared_ptr<Runner> runner;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto it = pendingResponses_.find(msgId);
-            if (it != pendingResponses_.end()) {
-                RunnerResponse response = it->second;
-                pendingResponses_.erase(it);
-                return response;
+            runner = slot.runner;
+        }
+        r = runner->runHook(type, context);
+        std::string died;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            slot.lastHeartbeat = TimeUtil::now();
+            if (slot.runner == runner && !runner->isAlive()) {
+                slot.state = RunnerState::RUNNER_ERROR;
+                slot.lastError = r.errorMessage.empty() ? "Runner died" : r.errorMessage;
+                died = slot.lastError;
             }
         }
-        auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() >= timeout) {
-            RunnerResponse response;
-            response.messageId = msgId;
-            response.success = false;
-            response.error = "Timeout waiting for runner response";
-            return response;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (!died.empty()) publish(EventType::RUNNER_ERROR, died, slot.index);
+        return r;
+    };
+
+    if (Slot* bound = boundSlot()) return runOn(*bound);
+
+    Session session = acquireSession();
+    Slot* slot = session.active() ? boundSlot() : nullptr;
+    if (!slot) {
+        HookResult r;
+        r.success = false;
+        r.errorMessage = "Runner not available";
+        return r;
     }
+    return runOn(*slot);
 }
 
-int RunnerBridge::sendMessage(const RunnerMessage& message) {
-    if (!process_) return -1;
-    std::string serialized = serializeMessage(message);
-    process_->sendMessage(serialized);
-    return message.id;
-}
-
-void RunnerBridge::receiveLoop() {
-    while (!stopReceiving_) {
-        if (process_ && process_->isRunning()) {
-            std::string message = process_->receiveMessage(100);
-            if (!message.empty()) handleMessage(message);
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
+std::vector<StepValue> RunnerBridge::getAllSteps() {
+    if (auto runner = anyAliveRunner()) return runner->getAllSteps();
+    Session session = acquireSession();
+    Slot* slot = session.active() ? boundSlot() : nullptr;
+    if (!slot || !ensureAlive(*slot)) return {};
+    std::shared_ptr<Runner> runner;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        runner = slot->runner;
     }
+    return runner->getAllSteps();
 }
 
-void RunnerBridge::heartbeatLoop() {
-    while (!stopHeartbeat_) {
-        if (isConnected()) {
-            if (process_ && !process_->isRunning()) {
-                state_ = RunnerState::RUNNER_ERROR;
-                publishRunnerEvent(EventType::RUNNER_DISCONNECTED, "Runner process died");
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::seconds(5));
+bool RunnerBridge::hasStep(const std::string& parameterizedText) {
+    if (auto runner = anyAliveRunner()) return runner->hasStep(parameterizedText);
+    Session session = acquireSession();
+    Slot* slot = session.active() ? boundSlot() : nullptr;
+    if (!slot || !ensureAlive(*slot)) return true;
+    std::shared_ptr<Runner> runner;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        runner = slot->runner;
     }
-}
-
-void RunnerBridge::handleMessage(const std::string& message) {
-    RunnerResponse response = parseResponse(message);
-    std::lock_guard<std::mutex> lock(mutex_);
-    pendingResponses_[response.messageId] = response;
-}
-
-RunnerResponse RunnerBridge::parseResponse(const std::string& responseStr) {
-    RunnerResponse response;
-    response.success = true;
-    response.payload = responseStr;
-    return response;
-}
-
-std::string RunnerBridge::serializeMessage(const RunnerMessage& message) {
-    std::ostringstream oss;
-    oss << "{\"id\":" << message.id << ",\"type\":" << static_cast<int>(message.type) << ",\"payload\":" << message.payload << "}";
-    return oss.str();
-}
-
-std::string RunnerBridge::getRunnerCommand(const std::string& language) const {
-    if (language == "java") return "gauge-java-runner --stdio";
-    if (language == "python") return "gauge-python-runner --stdio";
-    if (language == "csharp") return "gauge-dotnet-runner --stdio";
-    if (language == "js" || language == "javascript") return "gauge-js-runner --stdio";
-    if (language == "ruby") return "gauge-ruby-runner --stdio";
-    return "gauge-" + language + "-runner --stdio";
-}
-
-void RunnerBridge::publishRunnerEvent(const std::string& eventType, const std::string& detail) {
-    publishEvent(eventType, "", {{"language", language_}, {"detail", detail}});
+    return runner->hasStep(parameterizedText);
 }
 
 } // namespace testhub

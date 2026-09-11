@@ -1,0 +1,23 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080
+  },
+  "runner": {
+    "language": "python",
+    "project_path": "/opt/testhub/runners/python"
+  },
+  "specs": {
+    "dir": "/opt/testhub/specs"
+  },
+  "execution": {
+    "results_dir": "/var/lib/testhub/results"
+  },
+  "scheduler": {
+    "dir": "/var/lib/testhub/schedules"
+  },
+  "logging": {
+    "level": "info",
+    "file": "/var/lib/testhub/testhub.log"
+  }
+}

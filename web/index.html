@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>TestHub</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <a class="skip-link visually-hidden" href="#main" data-i18n="跳到主要内容">跳到主要内容</a>
+  <div id="app" class="app">
+    <aside class="sidebar">
+      <a class="brand" href="#/dashboard">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-text">TestHub</span>
+        <span class="brand-version" id="brand-version"></span>
+      </a>
+      <div class="project-switch" id="project-switch" hidden>
+        <label class="visually-hidden" for="project-select" data-i18n="当前规范项目">当前规范项目</label>
+        <select id="project-select" data-i18n-aria="当前规范项目" aria-label="当前规范项目"></select>
+      </div>
+      <nav class="nav" id="nav" data-i18n-aria="主导航" aria-label="主导航">
+        <a href="#/dashboard" data-route="dashboard"><span class="nav-icon" aria-hidden="true">◫</span><span data-i18n="总览">总览</span></a>
+        <a href="#/run" data-route="run"><span class="nav-icon" aria-hidden="true">▶</span><span data-i18n="提交测试">提交测试</span></a>
+        <a href="#/tests" data-route="tests"><span class="nav-icon" aria-hidden="true">☰</span><span data-i18n="测试记录">测试记录</span></a>
+        <a href="#/trends" data-route="trends"><span class="nav-icon" aria-hidden="true">↗</span><span data-i18n="结果趋势">结果趋势</span></a>
+        <a href="#/schedules" data-route="schedules"><span class="nav-icon" aria-hidden="true">⏱</span><span data-i18n="测试计划">测试计划</span></a>
+        <a href="#/specs" data-route="specs"><span class="nav-icon" aria-hidden="true">≡</span><span data-i18n="规范文件">规范文件</span></a>
+        <a href="#/runner" data-route="runner"><span class="nav-icon" aria-hidden="true">⚙</span>Runner</a>
+        <a href="#/events" data-route="events"><span class="nav-icon" aria-hidden="true">⚡</span><span data-i18n="事件流">事件流</span></a>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="conn" id="conn-indicator">
+          <span class="conn-dot"></span>
+          <span class="conn-text" data-i18n="连接中…">连接中…</span>
+        </div>
+        <label class="lang-switch">
+          <span class="visually-hidden" data-i18n="界面语言">界面语言</span>
+          <select id="lang-select" data-i18n-aria="界面语言" aria-label="界面语言">
+            <option value="zh">中文</option>
+            <option value="en">English</option>
+          </select>
+        </label>
+        <button class="auth" id="auth-btn" type="button" data-i18n-title="设置 API Token" title="设置 API Token"><span class="auth-dot"></span><span class="auth-text" data-i18n="鉴权：检测中…">鉴权：检测中…</span></button>
+        <a class="muted small" href="/api/v1/status" target="_blank" rel="noopener" data-i18n="API 状态">API 状态</a>
+        <button class="muted small kbd-hint" id="shortcuts-btn" type="button" data-i18n-title="键盘快捷键" title="键盘快捷键"><span data-i18n="快捷键">快捷键</span> <kbd>?</kbd></button>
+      </div>
+    </aside>
+    <main class="main" id="main" tabindex="-1">
+      <div class="loading" data-i18n="正在加载…">正在加载…</div>
+    </main>
+  </div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <script src="/i18n.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

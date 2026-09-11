@@ -8,145 +8,70 @@
 
 ## 当前项目状态
 
-### 已完成的功能
-1. **基础框架** - 已实现并可编译运行
-2. **HTTP API 服务器** - 支持基本的 RESTful API
-3. **测试队列** - 支持任务排队和优先级
-4. **Runner 桥接** - 复用 Gauge Runner 插件协议
-5. **事件系统** - 发布/订阅模式
-6. **规范解析** - 复用 Gauge 解析器
+项目已是一个可独立构建、零第三方依赖的完整系统（v1.1.0）。已完成能力、路线图与迭代记录以 `TODO.md` 为唯一权威来源，架构与协议见 `DESIGN.md`，开发流程见 `QUICKSTART.md`。**开始任何任务前先阅读这三份文件。**
 
-### 已验证的 API 端点
-```
-GET  /api/v1/health          ✅ 工作正常
-GET  /api/v1/runner/status   ✅ 工作正常
-GET  /api/v1/tests           ✅ 工作正常
-POST /api/v1/tests/run       ✅ 工作正常
-```
+### 已完成的功能（摘要）
+1. **自包含构建** - CMake，`web/` 资源构建期内嵌，GCC/Clang `-Werror` 零警告
+2. **HTTP/1.1 + WebSocket 服务器** - keep-alive、流水线、`{param}` 路由、ETag 静态资源、RFC 6455
+3. **REST API** - 测试提交/查询/取消/重跑、规范 CRUD 与校验、Runner 状态、事件历史
+4. **执行引擎** - 优先级队列、标签表达式、数据驱动、上下文/清理、超时、取消、fail_fast、历史
+5. **Runner 桥接** - 子进程 JSON-lines 协议、心跳、自动重启、场景级会话锁；Python 参考 Runner
+6. **Web UI** - 总览、提交、测试记录、结果树、实时执行树、规范浏览/编辑、Runner、事件流
+7. **测试体系** - 51 单元 + 7 集成 + 7 协议测试，ctest，GitHub Actions 三平台
 
-### 项目位置
-```
-工作目录: C:\Users\13657\Desktop\uHIL\gauge\testhub
-编译目录: C:\Users\13657\Desktop\uHIL\gauge\testhub\build
-可执行文件: C:\Users\13657\Desktop\uHIL\gauge\testhub\build\testhub.exe
-```
-
-### 编译方法
-```powershell
-cd C:\Users\13657\Desktop\uHIL\gauge\testhub\build
-mingw32-make -j4
-```
-
-### 启动方法
-```powershell
-cd C:\Users\13657\Desktop\uHIL\gauge\testhub\build
-./testhub.exe --port 9090 --language java
+### 构建、测试与启动
+```bash
+cmake -S . -B build -DCMAKE_CXX_COMPILER=g++
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+./build/testhub --port 8080 --language python --dir runners/python   # 浏览器打开 http://localhost:8080/
 ```
 
 ## 开发任务清单
 
-按优先级顺序执行以下任务。每完成一个任务，立即开始下一个。
+按优先级顺序执行以下任务，每完成一个立即开始下一个；完成后在 `TODO.md` 勾选并记录迭代。
 
-### 第一阶段：核心功能完善 (立即开始)
+### 第一阶段：可用于生产的基础能力
 
-#### 任务 1：修复已知问题
-- [ ] 修复 HTTP 请求解析的边界情况
-- [ ] 处理并发连接时的线程安全问题
-- [ ] 添加连接超时处理
-- [ ] 修复 Windows 下的 socket 初始化问题
+#### 任务 1：结果持久化
+- [ ] 已完成的 `TestResult` 以 JSON 写入 `data/results/<test_id>.json`
+- [ ] 启动时回放历史，遵守 `history_limit`
+- [ ] 配置项 `execution.results_dir`，`--results-dir` 覆盖
+- [ ] 集成测试：重启服务器后 `GET /tests` 仍能看到历史
 
-#### 任务 2：完善测试执行引擎
-- [ ] 实现真实的规范文件加载和解析
-- [ ] 实现场景级别的过滤（按标签、按名称）
-- [ ] 实现数据表驱动的测试执行
-- [ ] 实现上下文步骤和清理步骤
-- [ ] 添加测试超时控制
-- [ ] 实现测试重试机制
+#### 任务 2：报表导出
+- [ ] `GET /api/v1/tests/{id}/report?format=junit` 生成 JUnit XML
+- [ ] `format=html` 生成自包含 HTML 报告
+- [ ] UI 结果页添加下载按钮
 
-#### 任务 3：完善 Runner 桥接
-- [ ] 实现 Gauge Runner 协议的完整握手流程
-- [ ] 实现步骤执行的请求/响应序列化
-- [ ] 添加 Runner 心跳检测
-- [ ] 实现 Runner 自动重连
-- [ ] 支持多个 Runner 实例
+#### 任务 3：回调通知
+- [ ] 实现 `callback_url`：测试结束后 POST 结果摘要
+- [ ] 失败重试（指数退避，上限 3 次），失败记入 `warnings`
+- [ ] 需要一个最小 HTTP 客户端（`util/http_client.h`）
 
-#### 任务 4：添加 WebSocket 支持
-- [ ] 实现 WebSocket 服务器
-- [ ] 支持实时事件推送
-- [ ] 实现客户端订阅机制
-- [ ] 添加心跳保活
+#### 任务 4：鉴权
+- [ ] `server.auth_token`；写操作要求 `Authorization: Bearer <token>`
+- [ ] WebSocket 通过 `?token=` 或首条消息鉴权
+- [ ] UI 提供 token 输入并存入 localStorage
 
-### 第二阶段：图形化界面 (完成第一阶段后开始)
+### 第二阶段：扩展性
 
-#### 任务 5：设计 Web UI 架构
-- [ ] 选择前端框架（推荐 Vue.js 或 React）
-- [ ] 设计页面结构和路由
-- [ ] 设计 API 接口规范
-- [ ] 创建前端项目骨架
+#### 任务 5：Runner 池
+- [ ] `RunnerBridge` 管理 N 个 Runner 实例，`acquireSession()` 返回空闲实例
+- [ ] `max_concurrent_tests > 1` 时真正并行；保持有状态 Runner 的场景级独占
 
-#### 任务 6：实现 Dashboard 页面
-- [ ] 测试执行统计图表
-- [ ] 实时测试状态监控
-- [ ] 最近测试结果列表
-- [ ] Runner 状态显示
+#### 任务 6：Node.js 参考 Runner
+- [ ] `runners/node/testhub_runner.js`，与 Python Runner 同等能力
+- [ ] 协议自测脚本纳入 ctest
 
-#### 任务 7：实现测试管理页面
-- [ ] 测试规范文件浏览器
-- [ ] 测试提交表单
-- [ ] 测试历史记录
-- [ ] 测试结果详情查看
+#### 任务 7：规范目录监控
+- [ ] 轮询或平台 API 监听变更，自动 reload 并推送 `specs.reloaded`
 
-#### 任务 8：实现实时监控页面
-- [ ] WebSocket 实时事件流
-- [ ] 测试执行进度条
-- [ ] 步骤级别状态显示
-- [ ] 日志实时输出
-
-### 第三阶段：高级功能 (完成第二阶段后开始)
-
-#### 任务 9：添加数据库支持
-- [ ] 集成 SQLite
-- [ ] 设计数据表结构
-- [ ] 实现测试结果持久化
-- [ ] 实现历史记录查询
-
-#### 任务 10：添加用户认证
-- [ ] 实现 JWT 认证
-- [ ] 添加用户管理
-- [ ] 实现权限控制
-- [ ] 添加 API 密钥支持
-
-#### 任务 11：添加报告生成
-- [ ] 实现 HTML 报告生成
-- [ ] 支持 PDF 导出
-- [ ] 添加趋势分析
-- [ ] 实现报告邮件发送
-
-#### 任务 12：添加 CI/CD 集成
-- [ ] 提供 CLI 工具
-- [ ] 支持 Jenkins 插件
-- [ ] 支持 GitHub Actions
-- [ ] 实现 Webhook 回调
-
-### 第四阶段：性能优化 (持续进行)
-
-#### 任务 13：性能优化
-- [ ] 优化 HTTP 服务器性能
-- [ ] 实现连接池
-- [ ] 添加缓存机制
-- [ ] 优化内存使用
-
-#### 任务 14：可靠性提升
-- [ ] 添加单元测试（目标：80% 覆盖率）
-- [ ] 添加集成测试
-- [ ] 实现错误恢复机制
-- [ ] 添加健康检查和自愈能力
-
-#### 任务 15：文档完善
-- [ ] 编写 API 文档（使用 OpenAPI/Swagger）
-- [ ] 编写用户手册
-- [ ] 编写开发者指南
-- [ ] 添加代码注释
+### 第三阶段：体验与工程质量
+- [ ] 定时任务 / 测试计划
+- [ ] 结果趋势与对比
+- [ ] UI：只看失败、搜索、编辑器补全
+- [ ] 压力测试、覆盖率、clang-tidy、i18n
 
 ## 技术规范
 
@@ -181,25 +106,19 @@ Logger::getInstance().debug("debug info");
 ### 文件组织
 ```
 src/
-├── main.cpp              # 程序入口
-├── testhub.h/cpp         # 主服务器类
-├── server/               # 服务器模块
-│   ├── http_server.h/cpp
-│   ├── websocket_server.h/cpp
-│   └── request_handler.h/cpp
-├── engine/               # 执行引擎
-│   ├── execution_engine.h/cpp
-│   ├── test_session.h/cpp
-│   └── test_queue.h/cpp
-├── runner/               # Runner 桥接
-│   ├── runner_bridge.h/cpp
-│   └── grpc_client.h/cpp
-├── parser/               # 规范解析
-├── event/                # 事件系统
-├── model/                # 数据模型
-├── storage/              # 存储层
-├── auth/                 # 认证模块
-└── util/                 # 工具类
+├── main.cpp                 # CLI、配置、daemonize
+├── testhub.h/cpp            # 配置模型 + TestHub 门面
+├── server/                  # http_server, websocket_server, api_routes, web_ui, web_assets
+├── engine/                  # execution_engine, test_queue, tag_filter
+├── runner/                  # runner, mock_runner, process_runner, runner_bridge
+├── spec/                    # spec, spec_parser, spec_repository
+├── event/                   # event_bus
+├── model/                   # types, json_convert
+└── util/                    # json, sha1, base64, logger, string/file/time 工具
+web/                         # index.html, app.js, app.css（构建期内嵌）
+runners/python/              # 参考 Runner、step_impl、协议测试
+specs/                       # 示例规范
+tests/                       # 单元 + 集成测试
 ```
 
 ## 自我完善机制
@@ -227,33 +146,33 @@ src/
 ### 4. 文档更新
 - 每个新功能都应该有对应的文档
 - API 变更应该更新 API 文档
-- 重要决策应该记录在 DESIGN.md 中
+- 重要决策记录在 TODO.md 的决策表中，架构变更同步 DESIGN.md
 
 ## 迭代流程
 
-每个迭代周期（建议 2-4 小时）应该包含以下步骤：
+每个迭代周期应该包含以下步骤：
 
-### 1. 规划（5 分钟）
+### 1. 规划
 - 选择下一个要完成的任务
 - 分析任务需求
 - 设计实现方案
 
-### 2. 实现（60-90% 的时间）
+### 2. 实现
 - 编写代码
 - 编写测试
 - 调试和修复问题
 
-### 3. 测试（10-20% 的时间）
-- 运行单元测试
-- 运行集成测试
-- 手动测试关键功能
+### 3. 测试
+- `ctest --test-dir build`（单元 + 集成 + 协议）
+- 涉及 UI 时用浏览器实测关键页面
+- 用 curl 验证新增/变更的端点
 
-### 4. 审查（5-10% 的时间）
+### 4. 审查
 - 代码审查
 - 性能检查
 - 安全检查
 
-### 5. 文档（5% 的时间）
+### 5. 文档
 - 更新文档
 - 记录决策
 - 更新 TODO 列表

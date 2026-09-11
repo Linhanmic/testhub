@@ -1,0 +1,17 @@
+[Unit]
+Description=TestHub automated test daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/testhub --config /etc/testhub/testhub.json
+Restart=on-failure
+RestartSec=3
+User=testhub
+Group=testhub
+WorkingDirectory=/var/lib/testhub
+# 绑定端口后注入 TESTHUB_URL；容器/反向代理场景请在 testhub.json 设 callbacks.public_base_url
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

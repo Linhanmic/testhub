@@ -1,187 +1,396 @@
 /*
  * TestHub - 持久化自动化测试系统
- * 程序入口
+ * 程序入口：解析命令行、加载配置、启动服务器并等待退出信号
  */
 
 #include "testhub.h"
+#include "util/file_util.h"
+#include "util/logger.h"
 
-#include <iostream>
-#include <string>
-#include <fstream>
-#include <csignal>
-#include <thread>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <csignal>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <mutex>
+#include <string>
+#include <thread>
 
-#ifdef _WIN32
-#include <windows.h>
-#else
+#ifndef _WIN32
 #include <unistd.h>
-#include <signal.h>
-#endif
-
-// 全局变量
-static testhub::TestHub* g_testhub = nullptr;
-static std::atomic<bool> g_running{true};
-
-/**
- * 信号处理
- */
-void signalHandler(int signal) {
-    std::cout << "\nReceived signal " << signal << ", shutting down..." << std::endl;
-    g_running = false;
-    
-    if (g_testhub) {
-        g_testhub->stop();
-    }
-}
-
-/**
- * 打印使用说明
- */
-void printUsage(const char* programName) {
-    std::cout << "TestHub - 持久化自动化测试系统" << std::endl;
-    std::cout << std::endl;
-    std::cout << "用法: " << programName << " [选项]" << std::endl;
-    std::cout << std::endl;
-    std::cout << "选项:" << std::endl;
-    std::cout << "  -p, --port <port>           服务器端口 (默认: 8080)" << std::endl;
-    std::cout << "  -l, --language <language>   Runner 语言 (默认: java)" << std::endl;
-    std::cout << "  -d, --dir <path>            项目目录 (默认: 当前目录)" << std::endl;
-    std::cout << "  --specs <path>              规范目录 (默认: specs)" << std::endl;
-    std::cout << "  --daemon                    后台运行模式" << std::endl;
-    std::cout << "  --pid-file <path>           PID 文件路径" << std::endl;
-    std::cout << "  -h, --help                  显示帮助" << std::endl;
-    std::cout << "  -v, --version               显示版本" << std::endl;
-    std::cout << std::endl;
-    std::cout << "示例:" << std::endl;
-    std::cout << "  " << programName << " --port 8080 --language java" << std::endl;
-    std::cout << "  " << programName << " --daemon --pid-file /var/run/testhub.pid" << std::endl;
-    std::cout << std::endl;
-    std::cout << "API 端点:" << std::endl;
-    std::cout << "  POST /api/v1/tests/run      提交测试" << std::endl;
-    std::cout << "  GET  /api/v1/tests/{id}      查询测试状态" << std::endl;
-    std::cout << "  GET  /api/v1/tests           列出所有测试" << std::endl;
-    std::cout << "  GET  /api/v1/runner/status   Runner 状态" << std::endl;
-    std::cout << "  GET  /api/v1/health          健康检查" << std::endl;
-}
-
-/**
- * 打印版本
- */
-void printVersion() {
-    std::cout << "TestHub version 1.0.0" << std::endl;
-}
-
-/**
- * 写入 PID 文件
- */
-bool writePidFile(const std::string& pidFile) {
-#ifdef _WIN32
-    DWORD pid = GetCurrentProcessId();
 #else
-    pid_t pid = getpid();
+#include "win_service.h"
+#include <filesystem>
 #endif
-    
-    std::ofstream file(pidFile);
-    if (file.is_open()) {
-        file << pid;
-        file.close();
-        return true;
+
+namespace {
+
+std::atomic<bool> g_shutdownRequested{false};
+std::mutex g_shutdownMutex;
+std::condition_variable g_shutdownCv;
+
+void handleSignal(int) {
+    g_shutdownRequested = true;
+    g_shutdownCv.notify_all();
+}
+
+void printUsage(const char* program) {
+    std::cout
+        << "TestHub " << testhub::TestHub::version() << " - 持久化自动化测试系统\n\n"
+        << "用法: " << program << " [选项]\n\n"
+        << "选项:\n"
+        << "  -p, --port <port>          HTTP 监听端口（默认 8080，0 表示自动分配）\n"
+        << "  -H, --host <host>          监听地址（默认 0.0.0.0）\n"
+        << "  -l, --language <lang>      Runner 语言：mock | python | node | custom（默认 mock）\n"
+        << "  -r, --runner-cmd <cmd>     自定义 Runner 启动命令（覆盖语言默认值）\n"
+        << "  -d, --dir <path>           测试项目目录（Runner 工作目录）\n"
+        << "      --runner-pool <n>      Runner 进程数（默认 0：跟随 -j，每个并发测试一个进程）\n"
+        << "  -s, --specs <path>         规范目录（默认 specs；有多项目时选中匹配项或改写当前项目）\n"
+        << "      --concepts <path>      概念(.cpt)目录（默认与规范目录相同）\n"
+        << "      --watch-interval <ms>  规范目录轮询间隔（默认 2000，0 禁用）\n"
+        << "      --no-watch             不监控规范目录变化\n"
+        << "  -c, --config <file>        JSON 配置文件\n"
+        << "  -j, --concurrency <n>      并发执行的测试数（默认 1）\n"
+        << "      --timeout <ms>         测试默认超时（毫秒）\n"
+        << "      --results-dir <path>   结果持久化目录（默认 data/results）\n"
+        << "      --no-persist           不持久化结果，仅保存在内存\n"
+        << "      --schedules-dir <path> 测试计划目录（默认 data/schedules）\n"
+        << "      --no-scheduler         不启动 cron 调度器\n"
+        << "      --public-url <url>     回调载荷中链接的公开地址前缀（如 http://ci.example.com:8080）\n"
+        << "      --no-callbacks         禁用 callback_url 完成回调\n"
+        << "      --auth-token <token>   启用 Bearer Token 鉴权（也可用环境变量 TESTHUB_AUTH_TOKEN）\n"
+        << "      --auth-protect-reads   鉴权同时覆盖 GET 与 WebSocket（默认只保护写操作）\n"
+        << "      --log-level <level>    debug | info | warn | error | off\n"
+        << "      --log-file <file>      日志文件\n"
+        << "      --no-ui                不提供 Web UI\n"
+        << "      --web-dir <path>       从磁盘目录提供 Web UI（前端开发模式）\n"
+        << "      --pid-file <file>      写入 PID 文件\n"
+#ifndef _WIN32
+        << "      --daemon               以守护进程方式运行（POSIX）\n"
+#endif
+        << "      --service <cmd>        Windows 服务：install | uninstall | run（仅 Windows）\n"
+        << "      --service-name <name>  服务名（默认 TestHub）\n"
+        << "      --print-config         打印最终生效配置并退出\n"
+        << "  -v, --version              显示版本\n"
+        << "  -h, --help                 显示帮助\n\n"
+        << "示例:\n"
+        << "  " << program << " --port 8080 --specs ./specs\n"
+        << "  " << program << " --language python --dir ./my-tests\n"
+        << "  " << program << " --config testhub.json\n";
+}
+
+bool needsValue(const std::string& opt) {
+    static const char* withValue[] = {
+        "-p", "--port", "-H", "--host", "-l", "--language", "-r", "--runner-cmd", "-d", "--dir", "--runner-pool",
+        "-s", "--specs", "--concepts", "--watch-interval", "-c", "--config", "-j", "--concurrency", "--timeout",
+        "--results-dir", "--schedules-dir", "--public-url", "--auth-token", "--log-level", "--log-file", "--web-dir", "--pid-file",
+        "--service", "--service-name"};
+    for (const char* w : withValue) {
+        if (opt == w) return true;
     }
-    
     return false;
 }
 
-/**
- * 主函数
- */
+int parseIntOrExit(const std::string& opt, const std::string& value) {
+    try {
+        size_t idx = 0;
+        int v = std::stoi(value, &idx);
+        if (idx != value.size()) throw std::invalid_argument("trailing characters");
+        return v;
+    } catch (const std::exception&) {
+        std::cerr << "错误: 选项 " << opt << " 需要整数参数，得到 '" << value << "'\n";
+        std::exit(2);
+    }
+}
+
+} // namespace
+
 int main(int argc, char* argv[]) {
-    // 解析命令行参数
     testhub::TestHubConfig config;
-    bool daemonMode = false;
+    std::string configFile;
     std::string pidFile;
-    
+    std::string specsOverride;
+    std::string conceptsOverride;
+    bool daemonize = false;
+    bool printConfig = false;
+    std::string serviceCmd;
+    std::string serviceName = "TestHub";
+
+    // 第一遍：先找配置文件，使命令行选项能覆盖配置文件
     for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        
-        if (arg == "-p" || arg == "--port") {
-            if (i + 1 < argc) {
-                config.port = std::stoi(argv[++i]);
+        std::string opt = argv[i];
+        if ((opt == "-c" || opt == "--config") && i + 1 < argc) configFile = argv[i + 1];
+    }
+    if (!configFile.empty()) {
+        if (!testhub::FileUtil::fileExists(configFile)) {
+            std::cerr << "错误: 配置文件不存在: " << configFile << "\n";
+            return 2;
+        }
+        std::string error;
+        testhub::Json json = testhub::Json::tryParse(testhub::FileUtil::readFile(configFile), &error);
+        if (!error.empty()) {
+            std::cerr << "错误: 配置文件解析失败: " << error << "\n";
+            return 2;
+        }
+        config.applyJson(json);
+    }
+    // 环境变量优先级介于配置文件与命令行之间，便于在容器中注入密钥
+    if (const char* envToken = std::getenv("TESTHUB_AUTH_TOKEN"); envToken && *envToken) {
+        config.authToken = envToken;
+    }
+
+    for (int i = 1; i < argc; ++i) {
+        std::string opt = argv[i];
+        std::string value;
+        if (needsValue(opt)) {
+            if (i + 1 >= argc) {
+                std::cerr << "错误: 选项 " << opt << " 缺少参数\n";
+                return 2;
             }
-        } else if (arg == "-l" || arg == "--language") {
-            if (i + 1 < argc) {
-                config.runnerLanguage = argv[++i];
-            }
-        } else if (arg == "-d" || arg == "--dir") {
-            if (i + 1 < argc) {
-                config.projectPath = argv[++i];
-            }
-        } else if (arg == "--specs") {
-            if (i + 1 < argc) {
-                config.specsDir = argv[++i];
-            }
-        } else if (arg == "--daemon") {
-            daemonMode = true;
-        } else if (arg == "--pid-file") {
-            if (i + 1 < argc) {
-                pidFile = argv[++i];
-            }
-        } else if (arg == "-h" || arg == "--help") {
+            value = argv[++i];
+        }
+
+        if (opt == "-h" || opt == "--help") {
             printUsage(argv[0]);
             return 0;
-        } else if (arg == "-v" || arg == "--version") {
-            printVersion();
+        } else if (opt == "-v" || opt == "--version") {
+            std::cout << "TestHub " << testhub::TestHub::version() << "\n";
             return 0;
+        } else if (opt == "-p" || opt == "--port") {
+            config.port = parseIntOrExit(opt, value);
+        } else if (opt == "-H" || opt == "--host") {
+            config.host = value;
+        } else if (opt == "-l" || opt == "--language") {
+            config.runnerLanguage = value;
+        } else if (opt == "-r" || opt == "--runner-cmd") {
+            config.runnerCommand = value;
+            if (config.runnerLanguage == "mock") config.runnerLanguage = "custom";
+        } else if (opt == "-d" || opt == "--dir") {
+            config.projectPath = value;
+        } else if (opt == "--runner-pool") {
+            config.runnerPoolSize = parseIntOrExit(opt, value);
+        } else if (opt == "-s" || opt == "--specs") {
+            specsOverride = value;
+        } else if (opt == "--concepts") {
+            conceptsOverride = value;
+        } else if (opt == "--watch-interval") {
+            config.specsWatchIntervalMs = parseIntOrExit(opt, value);
+            config.specsWatch = config.specsWatchIntervalMs > 0;
+        } else if (opt == "--no-watch") {
+            config.specsWatch = false;
+        } else if (opt == "-c" || opt == "--config") {
+            // 已在第一遍处理
+        } else if (opt == "-j" || opt == "--concurrency") {
+            config.maxConcurrentTests = parseIntOrExit(opt, value);
+        } else if (opt == "--timeout") {
+            config.defaultTimeout = parseIntOrExit(opt, value);
+        } else if (opt == "--results-dir") {
+            config.resultsDir = value;
+        } else if (opt == "--no-persist") {
+            config.resultsDir.clear();
+        } else if (opt == "--schedules-dir") {
+            config.schedulesDir = value;
+        } else if (opt == "--no-scheduler") {
+            config.schedulerEnabled = false;
+        } else if (opt == "--public-url") {
+            config.publicBaseUrl = value;
+        } else if (opt == "--no-callbacks") {
+            config.callbacksEnabled = false;
+        } else if (opt == "--auth-token") {
+            config.authToken = value;
+        } else if (opt == "--auth-protect-reads") {
+            config.authProtectReads = true;
+        } else if (opt == "--log-level") {
+            config.logLevel = value;
+        } else if (opt == "--log-file") {
+            config.logFile = value;
+        } else if (opt == "--no-ui") {
+            config.enableWebUi = false;
+        } else if (opt == "--web-dir") {
+            config.webDir = value;
+        } else if (opt == "--pid-file") {
+            pidFile = value;
+        } else if (opt == "--daemon") {
+            daemonize = true;
+        } else if (opt == "--service") {
+            serviceCmd = value;
+        } else if (opt == "--service-name") {
+            serviceName = value;
+        } else if (opt == "--print-config") {
+            printConfig = true;
         } else {
-            std::cerr << "Unknown option: " << arg << std::endl;
+            std::cerr << "错误: 未知选项 " << opt << "\n\n";
             printUsage(argv[0]);
-            return 1;
+            return 2;
         }
     }
-    
-    // 设置信号处理
-    std::signal(SIGINT, signalHandler);
-    std::signal(SIGTERM, signalHandler);
-    
-    // 初始化 TestHub
-    testhub::TestHub& testhub = testhub::TestHub::getInstance();
-    g_testhub = &testhub;
-    
-    if (!testhub.initialize(config)) {
-        std::cerr << "Failed to initialize TestHub" << std::endl;
-        return 1;
+
+    if (config.port < 0 || config.port > 65535) {
+        std::cerr << "错误: 端口必须在 0-65535 之间\n";
+        return 2;
     }
-    
-    // 写入 PID 文件
-    if (!pidFile.empty()) {
-        if (!writePidFile(pidFile)) {
-            std::cerr << "Failed to write PID file: " << pidFile << std::endl;
+    if (config.maxConcurrentTests < 1) config.maxConcurrentTests = 1;
+    if (config.runnerPoolSize < 0) config.runnerPoolSize = 0;
+    if (config.runnerPoolSize > testhub::RunnerBridge::kMaxPoolSize) {
+        std::cerr << "错误: --runner-pool 最大为 " << testhub::RunnerBridge::kMaxPoolSize << "\n";
+        return 2;
+    }
+
+    config.finalizeProjects();
+    if (!specsOverride.empty()) config.applySpecsDirOverride(specsOverride);
+    if (!conceptsOverride.empty()) {
+        if (testhub::SpecProject* cur = config.findProject(config.currentProjectId)) {
+            cur->conceptsDir = conceptsOverride;
+        }
+        config.applyCurrentProject();
+    }
+
+    if (printConfig) {
+        std::cout << config.toJson().dump(2) << "\n";
+        return 0;
+    }
+
+#ifndef _WIN32
+    if (!serviceCmd.empty()) {
+        std::cerr << "错误: --service 仅在 Windows 上可用（install | uninstall | run）\n";
+        return 2;
+    }
+#else
+    if (serviceCmd == "install") {
+        std::string image = winQuoteArg(winExecutablePath());
+        for (int i = 1; i < argc; ++i) {
+            std::string a = argv[i];
+            if (a == "--service") {
+                image += " --service run";
+                if (i + 1 < argc && argv[i + 1][0] != '-') ++i;
+                continue;
+            }
+            if (a == "--service-name") {
+                if (i + 1 < argc) ++i;
+                continue;
+            }
+            image += " " + winQuoteArg(argv[i]);
+        }
+        std::string err;
+        if (!winServiceInstall(serviceName, "TestHub", image, &err)) {
+            std::cerr << "错误: 安装服务失败: " << err << "\n";
             return 1;
         }
+        std::cout << "已安装 Windows 服务 \"" << serviceName << "\"\n  " << image << "\n";
+        return 0;
     }
-    
-    // 启动服务器
-    if (!testhub.start()) {
-        std::cerr << "Failed to start TestHub" << std::endl;
-        return 1;
+    if (serviceCmd == "uninstall") {
+        std::string err;
+        if (!winServiceUninstall(serviceName, &err)) {
+            std::cerr << "错误: 卸载服务失败: " << err << "\n";
+            return 1;
+        }
+        std::cout << "已删除 Windows 服务 \"" << serviceName << "\"\n";
+        return 0;
     }
-    
-    std::cout << "TestHub is running. Press Ctrl+C to stop." << std::endl;
-    
-    // 主循环
-    while (g_running) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+    if (!serviceCmd.empty() && serviceCmd != "run") {
+        std::cerr << "错误: --service 应为 install、uninstall 或 run，得到 '" << serviceCmd << "'\n";
+        return 2;
     }
-    
-    // 停止服务器
-    testhub.stop();
-    
-    // 清理 PID 文件
+#endif
+
+#ifndef _WIN32
+    if (daemonize) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            std::cerr << "错误: fork 失败: " << std::strerror(errno) << "\n";
+            return 1;
+        }
+        if (pid > 0) {
+            std::cout << "TestHub 已在后台启动 (pid " << pid << ")\n";
+            return 0;
+        }
+        if (setsid() < 0) return 1;
+        if (config.logFile.empty()) config.logFile = "testhub.log";
+        testhub::Logger::getInstance().setConsole(false);
+        (void)!freopen("/dev/null", "r", stdin);
+        (void)!freopen("/dev/null", "w", stdout);
+        (void)!freopen("/dev/null", "w", stderr);
+    }
+#else
+    if (daemonize) {
+        std::cerr << "警告: --daemon 在 Windows 上不受支持，将以前台方式运行\n";
+    }
+#endif
+
     if (!pidFile.empty()) {
-        std::remove(pidFile.c_str());
+        std::ofstream pf(pidFile);
+#ifndef _WIN32
+        pf << getpid() << "\n";
+#else
+        pf << "0\n";
+#endif
     }
-    
-    std::cout << "TestHub stopped." << std::endl;
-    
+
+    std::signal(SIGINT, handleSignal);
+    std::signal(SIGTERM, handleSignal);
+#ifndef _WIN32
+    std::signal(SIGPIPE, SIG_IGN);
+    std::signal(SIGHUP, handleSignal);
+#endif
+
+    testhub::TestHub hub;
+    auto startHub = [&]() -> bool {
+        if (!hub.initialize(config)) {
+            std::cerr << "错误: TestHub 初始化失败\n";
+            return false;
+        }
+        if (!hub.start()) {
+            std::cerr << "错误: TestHub 启动失败（端口 " << config.port << " 是否已被占用？）\n";
+            return false;
+        }
+        return true;
+    };
+    auto waitHub = [&]() {
+        std::unique_lock<std::mutex> lock(g_shutdownMutex);
+        while (!g_shutdownRequested.load()) {
+            g_shutdownCv.wait_for(lock, std::chrono::milliseconds(200));
+        }
+    };
+    auto stopHub = [&]() {
+        std::cout << "\n正在停止 TestHub...\n";
+        hub.stop();
+        if (!pidFile.empty()) testhub::FileUtil::deleteFile(pidFile);
+    };
+
+#ifdef _WIN32
+    auto requestStop = [&]() {
+        g_shutdownRequested = true;
+        g_shutdownCv.notify_all();
+    };
+    if (serviceCmd == "run") {
+        if (config.logFile.empty()) {
+            std::error_code ec;
+            auto logDir = std::filesystem::path(winExecutablePath()).parent_path() / "data";
+            std::filesystem::create_directories(logDir, ec);
+            config.logFile = (logDir / "testhub.log").string();
+        }
+        testhub::Logger::getInstance().setConsole(false);
+        if (winServiceDispatch(serviceName, startHub, waitHub, stopHub, requestStop)) return 0;
+    }
+#endif
+
+    if (!startHub()) return 1;
+
+    if (!daemonize && serviceCmd != "run") {
+        std::cout << "\n  TestHub " << testhub::TestHub::version() << " 已启动\n"
+                  << "  Web UI : http://" << (config.host == "0.0.0.0" ? "localhost" : config.host) << ":" << hub.boundPort() << "/\n"
+                  << "  API    : http://" << (config.host == "0.0.0.0" ? "localhost" : config.host) << ":" << hub.boundPort() << "/api/v1/\n"
+                  << "  Runner : " << config.runnerLanguage << "\n"
+                  << "  Specs  : " << hub.getSpecs().specsDir()
+                  << (config.currentProjectId.empty() ? "" : " [" + config.currentProjectId + "]") << "\n"
+                  << "  按 Ctrl+C 停止\n\n";
+    }
+
+    waitHub();
+    stopHub();
     return 0;
 }

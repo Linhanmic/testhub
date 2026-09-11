@@ -1,21 +1,30 @@
 /*
  * TestHub - HTTP 服务器
- * 提供 RESTful API 接口
+ * 零依赖的 HTTP/1.1 服务器：路由（含路径参数）、静态资源、keep-alive、
+ * 请求体按 Content-Length 完整读取、连接线程池、WebSocket 升级钩子。
  */
 
 #pragma once
 
-#include "../model/types.h"
-#include "../engine/test_queue.h"
-#include "../runner/runner_bridge.h"
+#include "../util/json.h"
 
-#include <string>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
-#include <thread>
-#include <atomic>
 #include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#ifdef _WIN32
+#include <winsock2.h>
+using socket_t = SOCKET;
+#else
+using socket_t = int;
+#endif
 
 namespace testhub {
 
@@ -23,11 +32,37 @@ namespace testhub {
  * HTTP 请求
  */
 struct HttpRequest {
-    std::string method;      // GET, POST, PUT, DELETE
-    std::string path;        // 请求路径
-    std::string body;        // 请求体
-    std::map<std::string, std::string> headers;
-    std::map<std::string, std::string> queryParams;
+    std::string method;
+    std::string path;          // 已解码的路径（不含查询串）
+    std::string rawTarget;     // 原始请求目标
+    std::string version = "HTTP/1.1";
+    std::string body;
+    std::map<std::string, std::string> headers;      // 键小写
+    std::map<std::string, std::string> queryParams;  // 已解码
+    std::map<std::string, std::string> pathParams;   // 路由参数
+    std::string remoteAddress;
+
+    std::string header(const std::string& name, const std::string& def = "") const {
+        std::string key;
+        for (char c : name) key.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        auto it = headers.find(key);
+        return it == headers.end() ? def : it->second;
+    }
+    std::string query(const std::string& name, const std::string& def = "") const {
+        auto it = queryParams.find(name);
+        return it == queryParams.end() ? def : it->second;
+    }
+    std::string param(const std::string& name, const std::string& def = "") const {
+        auto it = pathParams.find(name);
+        return it == pathParams.end() ? def : it->second;
+    }
+    bool keepAlive() const {
+        std::string c = header("connection");
+        for (auto& ch : c) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (c.find("close") != std::string::npos) return false;
+        if (version == "HTTP/1.0") return c.find("keep-alive") != std::string::npos;
+        return true;
+    }
 };
 
 /**
@@ -37,234 +72,200 @@ struct HttpResponse {
     int statusCode = 200;
     std::string body;
     std::map<std::string, std::string> headers;
-    
+    bool handled = true;  // false 表示由处理器接管了连接（如 WebSocket）
+
     HttpResponse() {
-        headers["Content-Type"] = "application/json";
-        headers["Access-Control-Allow-Origin"] = "*";
+        headers["Content-Type"] = "application/json; charset=utf-8";
     }
-    
-    static HttpResponse json(int code, const std::string& jsonBody) {
-        HttpResponse response;
-        response.statusCode = code;
-        response.body = jsonBody;
-        return response;
+
+    static HttpResponse json(int code, const Json& value) {
+        HttpResponse r;
+        r.statusCode = code;
+        r.body = value.dump();
+        return r;
     }
-    
-    static HttpResponse error(int code, const std::string& message) {
-        HttpResponse response;
-        response.statusCode = code;
-        response.body = "{\"error\":\"" + message + "\"}";
-        return response;
+    static HttpResponse json(int code, const std::string& rawJson) {
+        HttpResponse r;
+        r.statusCode = code;
+        r.body = rawJson;
+        return r;
     }
+    static HttpResponse text(int code, const std::string& text, const std::string& contentType = "text/plain; charset=utf-8") {
+        HttpResponse r;
+        r.statusCode = code;
+        r.body = text;
+        r.headers["Content-Type"] = contentType;
+        return r;
+    }
+    static HttpResponse html(const std::string& html) { return text(200, html, "text/html; charset=utf-8"); }
+    static HttpResponse error(int code, const std::string& message, const std::string& detail = "") {
+        Json j = Json::object();
+        j["error"] = message;
+        j["status"] = code;
+        if (!detail.empty()) j["detail"] = detail;
+        return json(code, j);
+    }
+    static HttpResponse noContent() {
+        HttpResponse r;
+        r.statusCode = 204;
+        r.headers.erase("Content-Type");
+        return r;
+    }
+    static HttpResponse redirect(const std::string& location, int code = 302) {
+        HttpResponse r;
+        r.statusCode = code;
+        r.headers["Location"] = location;
+        r.headers.erase("Content-Type");
+        return r;
+    }
+    static HttpResponse hijacked() {
+        HttpResponse r;
+        r.handled = false;
+        return r;
+    }
+
+    static const char* reasonPhrase(int code);
 };
 
-/**
- * 请求处理器类型
- */
 using RequestHandler = std::function<HttpResponse(const HttpRequest&)>;
 
 /**
- * 路由定义
+ * WebSocket/原始连接接管处理器：返回 true 表示已接管 socket（服务器不再关闭）
  */
-struct Route {
-    std::string method;
-    std::string pathPattern;
-    RequestHandler handler;
-};
+using UpgradeHandler = std::function<bool(socket_t socket, const HttpRequest& request)>;
 
 /**
- * HTTP 服务器
- * 提供 RESTful API 接口
+ * 请求过滤器：在路由之前调用（OPTIONS 预检除外，WebSocket 升级也会经过）。
+ * 返回 false 表示拒绝，此时 denied 作为响应发送。
  */
+using RequestFilter = std::function<bool(const HttpRequest& request, HttpResponse& denied)>;
+
+/**
+ * 服务器配置
+ */
+struct HttpServerConfig {
+    std::string host = "0.0.0.0";
+    int port = 8080;
+    int workerThreads = 8;
+    int backlog = 64;
+    int readTimeoutMs = 15000;
+    int keepAliveTimeoutMs = 10000;
+    size_t maxHeaderBytes = 64 * 1024;
+    size_t maxBodyBytes = 16 * 1024 * 1024;
+    bool enableCors = true;
+    bool logRequests = true;
+};
+
 class HttpServer {
 public:
-    HttpServer(int port = 8080);
+    explicit HttpServer(int port = 8080);
+    explicit HttpServer(const HttpServerConfig& config);
     ~HttpServer();
 
-    /**
-     * 启动服务器
-     */
     bool start();
-
-    /**
-     * 停止服务器
-     */
     void stop();
-
-    /**
-     * 检查服务器是否运行中
-     */
     bool isRunning() const { return running_; }
+    int port() const { return boundPort_; }
+    const std::string& lastError() const { return lastError_; }
 
-    /**
-     * 注册路由
-     */
+    // 路由注册。路径支持 {param} 与末尾通配 * ；例如 /api/v1/tests/{id}/result、/static/*
     void addRoute(const std::string& method, const std::string& path, RequestHandler handler);
+    void get(const std::string& path, RequestHandler handler) { addRoute("GET", path, std::move(handler)); }
+    void post(const std::string& path, RequestHandler handler) { addRoute("POST", path, std::move(handler)); }
+    void put(const std::string& path, RequestHandler handler) { addRoute("PUT", path, std::move(handler)); }
+    void del(const std::string& path, RequestHandler handler) { addRoute("DELETE", path, std::move(handler)); }
+    void patch(const std::string& path, RequestHandler handler) { addRoute("PATCH", path, std::move(handler)); }
 
     /**
-     * 注册 GET 路由
+     * 注册升级处理器（WebSocket）
      */
-    void get(const std::string& path, RequestHandler handler) {
-        addRoute("GET", path, handler);
+    void addUpgradeHandler(const std::string& path, UpgradeHandler handler);
+
+    /**
+     * 注册内存静态资源
+     */
+    void addStaticAsset(const std::string& path, std::string content, const std::string& contentType);
+
+    /**
+     * 注册磁盘静态目录：urlPrefix 下的请求映射到 dir；index.html 作为目录默认页
+     */
+    void serveDirectory(const std::string& urlPrefix, const std::string& dir);
+
+    /**
+     * 未匹配路由时的回退处理（例如 SPA 的 index.html）
+     */
+    void setFallback(RequestHandler handler) { fallback_ = std::move(handler); }
+
+    /**
+     * 请求过滤器（鉴权等）；仅支持一个，置空表示移除
+     */
+    void setRequestFilter(RequestFilter filter) {
+        std::lock_guard<std::mutex> lock(routesMutex_);
+        filter_ = std::move(filter);
     }
 
     /**
-     * 注册 POST 路由
+     * 直接处理一个请求（不经网络；用于单元测试）
      */
-    void post(const std::string& path, RequestHandler handler) {
-        addRoute("POST", path, handler);
-    }
+    HttpResponse dispatch(const HttpRequest& request);
 
-    /**
-     * 注册 PUT 路由
-     */
-    void put(const std::string& path, RequestHandler handler) {
-        addRoute("PUT", path, handler);
-    }
+    static std::string urlDecode(const std::string& s);
+    static std::string mimeTypeFor(const std::string& path);
+    static std::map<std::string, std::string> parseQueryString(const std::string& qs);
+    static bool parseRequestHead(const std::string& head, HttpRequest& request, std::string& error);
+    static std::string serialize(const HttpResponse& response, bool keepAlive);
 
-    /**
-     * 注册 DELETE 路由
-     */
-    void del(const std::string& path, RequestHandler handler) {
-        addRoute("DELETE", path, handler);
-    }
-
-    /**
-     * 设置测试队列
-     */
-    void setTestQueue(TestQueue* queue) { testQueue_ = queue; }
-
-    /**
-     * 设置 Runner 桥接
-     */
-    void setRunnerBridge(RunnerBridge* bridge) { runnerBridge_ = bridge; }
+    size_t activeConnections() const { return activeConnections_; }
+    unsigned long long requestCount() const { return requestCount_; }
 
 private:
-    // 端口
-    int port_;
-    
-    // 是否运行中
+    struct Route {
+        std::string method;
+        std::vector<std::string> segments;
+        bool wildcard = false;
+        RequestHandler handler;
+    };
+    struct StaticAsset {
+        std::string content;
+        std::string contentType;
+        std::string etag;
+    };
+
+    HttpServerConfig config_;
     std::atomic<bool> running_{false};
-    
-    // 监听线程
-    std::thread listenThread_;
-    
-    // 路由列表
+    std::atomic<bool> stopping_{false};
+    socket_t listenSocket_;
+    int boundPort_ = 0;
+    std::string lastError_;
+
+    std::thread acceptThread_;
+    std::vector<std::thread> workers_;
+    std::deque<std::pair<socket_t, std::string>> pending_;
+    std::mutex pendingMutex_;
+    std::condition_variable pendingCv_;
+
+    mutable std::mutex routesMutex_;
     std::vector<Route> routes_;
-    
-    // 互斥锁
-    std::mutex mutex_;
-    
-    // 测试队列
-    TestQueue* testQueue_ = nullptr;
-    
-    // Runner 桥接
-    RunnerBridge* runnerBridge_ = nullptr;
+    std::map<std::string, UpgradeHandler> upgrades_;
+    std::map<std::string, StaticAsset> assets_;
+    std::vector<std::pair<std::string, std::string>> directories_;
+    RequestHandler fallback_;
+    RequestFilter filter_;
 
-    /**
-     * 监听循环
-     */
-    void listenLoop();
+    std::atomic<size_t> activeConnections_{0};
+    std::atomic<unsigned long long> requestCount_{0};
 
-    /**
-     * 处理连接
-     */
-    void handleConnection(int clientSocket);
-
-    /**
-     * 处理请求
-     */
-    HttpResponse handleRequest(const HttpRequest& request);
-
-    /**
-     * 匹配路由
-     */
-    bool matchRoute(const std::string& method, const std::string& path, 
-                    RequestHandler& handler, std::map<std::string, std::string>& params);
-
-    /**
-     * 解析 HTTP 请求
-     */
-    HttpRequest parseRequest(const std::string& rawRequest);
-
-    /**
-     * 序列化 HTTP 响应
-     */
-    std::string serializeResponse(const HttpResponse& response);
-
-    /**
-     * 解析查询参数
-     */
-    std::map<std::string, std::string> parseQueryParams(const std::string& queryString);
-
-    /**
-     * 注册默认路由
-     */
-    void registerDefaultRoutes();
-
-    // ============================================================
-    // API 处理器
-    // ============================================================
-
-    /**
-     * POST /api/v1/tests/run
-     * 提交测试运行请求
-     */
-    HttpResponse handleRunTest(const HttpRequest& request);
-
-    /**
-     * GET /api/v1/tests/{id}
-     * 查询测试状态
-     */
-    HttpResponse handleGetTestStatus(const HttpRequest& request);
-
-    /**
-     * GET /api/v1/tests
-     * 列出所有测试
-     */
-    HttpResponse handleListTests(const HttpRequest& request);
-
-    /**
-     * DELETE /api/v1/tests/{id}
-     * 取消测试
-     */
-    HttpResponse handleCancelTest(const HttpRequest& request);
-
-    /**
-     * GET /api/v1/tests/{id}/result
-     * 获取测试结果
-     */
-    HttpResponse handleGetTestResult(const HttpRequest& request);
-
-    /**
-     * GET /api/v1/specs
-     * 列出规范文件
-     */
-    HttpResponse handleListSpecs(const HttpRequest& request);
-
-    /**
-     * POST /api/v1/specs/validate
-     * 验证规范文件
-     */
-    HttpResponse handleValidateSpecs(const HttpRequest& request);
-
-    /**
-     * GET /api/v1/runner/status
-     * 获取 Runner 状态
-     */
-    HttpResponse handleGetRunnerStatus(const HttpRequest& request);
-
-    /**
-     * POST /api/v1/runner/restart
-     * 重启 Runner
-     */
-    HttpResponse handleRestartRunner(const HttpRequest& request);
-
-    /**
-     * GET /api/v1/health
-     * 健康检查
-     */
-    HttpResponse handleHealthCheck(const HttpRequest& request);
+    bool bindAndListen();
+    void acceptLoop();
+    void workerLoop();
+    void handleConnection(socket_t client, const std::string& remote);
+    bool readRequest(socket_t client, HttpRequest& request, std::string& buffer, int& errorCode,
+                     std::string& errorMessage, int firstByteTimeoutMs);
+    bool matchRoute(const HttpRequest& request, RequestHandler& handler, std::map<std::string, std::string>& params, bool& methodMismatch) const;
+    HttpResponse serveStatic(const HttpRequest& request, bool& found) const;
+    static bool sendAll(socket_t s, const std::string& data);
+    static void closeSocket(socket_t s);
+    static std::vector<std::string> splitPath(const std::string& path);
 };
 
 } // namespace testhub

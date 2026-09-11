@@ -1,2 +1,0 @@
-C:\msys64\mingw64\bin\ar.exe qc libtesthub_core.a CMakeFiles/testhub_core.dir/src/main.cpp.obj CMakeFiles/testhub_core.dir/src/testhub.cpp.obj CMakeFiles/testhub_core.dir/src/server/http_server.cpp.obj CMakeFiles/testhub_core.dir/src/runner/runner_bridge.cpp.obj
-C:\msys64\mingw64\bin\ranlib.exe libtesthub_core.a
