@@ -564,12 +564,9 @@ bool TestHub::selectProject(const std::string& id, std::string& error) {
         return false;
     }
     if (p->id == config_.currentProjectId) return true;
-    if (engine_) {
-        EngineStats st = engine_->stats();
-        if (st.queued + st.running > 0) {
-            error = "Cannot switch project while tests are queued or running";
-            return false;
-        }
+    if (engine_ && engine_->hasActiveTests()) {
+        error = "Cannot switch project while tests are queued or running";
+        return false;
     }
     config_.currentProjectId = p->id;
     config_.applyCurrentProject();

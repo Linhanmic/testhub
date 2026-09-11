@@ -526,15 +526,25 @@ EngineStats ExecutionEngine::stats() const {
         std::lock_guard<std::mutex> lock(statsMutex_);
         s = stats_;
     }
-    s.queued = queue_.size();
     {
         std::lock_guard<std::mutex> lock(recordsMutex_);
+        s.queued = 0;
         s.running = 0;
         for (const auto& kv : records_) {
-            if (kv.second.status.state == TestState::RUNNING) ++s.running;
+            if (kv.second.status.state == TestState::QUEUED) ++s.queued;
+            else if (kv.second.status.state == TestState::RUNNING) ++s.running;
         }
     }
     return s;
+}
+
+bool ExecutionEngine::hasActiveTests() const {
+    std::lock_guard<std::mutex> lock(recordsMutex_);
+    for (const auto& kv : records_) {
+        TestState st = kv.second.status.state;
+        if (st == TestState::QUEUED || st == TestState::RUNNING) return true;
+    }
+    return false;
 }
 
 // ============================================================

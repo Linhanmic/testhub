@@ -266,6 +266,31 @@ TEST_CASE("engine: cancel queued test, queue position and history trimming") {
     CHECK(stats.cancelled >= 1);
 }
 
+TEST_CASE("engine: stats count queued records after dequeue") {
+    Harness h(1);
+    h.temp.write("slow.spec", "# Slow\n## s\n* sleep \"300\"\n");
+    TestRequest req;
+    req.specFiles = {"slow.spec"};
+    std::string id = h.engine.submit(req);
+    bool sawActive = false;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    while (std::chrono::steady_clock::now() < deadline) {
+        EngineStats s = h.engine.stats();
+        if (s.queued + s.running >= 1 && h.engine.hasActiveTests()) {
+            sawActive = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(sawActive);
+    CHECK(h.engine.hasActiveTests());
+    CHECK(h.waitFor(id).state == TestState::PASSED);
+    CHECK(!h.engine.hasActiveTests());
+    EngineStats done = h.engine.stats();
+    CHECK_EQ(done.queued, static_cast<size_t>(0));
+    CHECK_EQ(done.running, static_cast<size_t>(0));
+}
+
 TEST_CASE("engine: concurrent workers execute in parallel") {
     Harness h(3);
     std::string slow = "# 慢\n## a\n* sleep \"200\"\n";

@@ -113,6 +113,8 @@ public:
     size_t clearHistory();
 
     EngineStats stats() const;
+    /** 是否有排队中或运行中的测试（含已出队、尚未标为 RUNNING 的窗口） */
+    bool hasActiveTests() const;
     const ResultStore& store() const { return store_; }
     size_t queueSize() const { return queue_.size(); }
     int queuePosition(const std::string& testId) const { return queue_.position(testId); }

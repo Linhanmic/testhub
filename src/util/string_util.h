@@ -4,11 +4,12 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cctype>
+#include <functional>
+#include <sstream>
 #include <string>
 #include <vector>
-#include <sstream>
-#include <algorithm>
-#include <functional>
 
 namespace testhub {
 
@@ -22,7 +23,9 @@ public:
      */
     static std::string toLower(const std::string& str) {
         std::string result = str;
-        std::transform(result.begin(), result.end(), result.begin(), ::tolower);
+        std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
         return result;
     }
 
@@ -31,7 +34,9 @@ public:
      */
     static std::string toUpper(const std::string& str) {
         std::string result = str;
-        std::transform(result.begin(), result.end(), result.begin(), ::toupper);
+        std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) {
+            return static_cast<char>(std::toupper(c));
+        });
         return result;
     }
 

@@ -1262,7 +1262,10 @@ TEST_CASE("integration: switch spec projects") {
     FileUtil::writeFile(s.specsDir + "/slow.spec", slow);
     HttpResult submit = request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["slow.spec"]})");
     REQUIRE_EQ(submit.status, 202);
-    CHECK_EQ(request(s.port, "POST", "/api/v1/projects/alt/select", "{}").status, 409);
+    Json snap = request(s.port, "GET", "/api/v1/status").json();
+    CHECK(snap["stats"]["queued"].asInt() + snap["stats"]["running"].asInt() >= 1);
+    HttpResult busySwitch = request(s.port, "POST", "/api/v1/projects/alt/select", "{}");
+    CHECK_EQ(busySwitch.status, 409);
     Json st = s.waitForTerminal(submit.json()["test_id"].asString());
     REQUIRE(!st.isNull());
     CHECK_EQ(request(s.port, "POST", "/api/v1/projects/alt/select", "{}").status, 200);
