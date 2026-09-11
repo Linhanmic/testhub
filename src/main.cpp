@@ -45,7 +45,7 @@ void printUsage(const char* program) {
         << "  -r, --runner-cmd <cmd>     自定义 Runner 启动命令（覆盖语言默认值）\n"
         << "  -d, --dir <path>           测试项目目录（Runner 工作目录）\n"
         << "      --runner-pool <n>      Runner 进程数（默认 0：跟随 -j，每个并发测试一个进程）\n"
-        << "  -s, --specs <path>         规范目录（默认 specs）\n"
+        << "  -s, --specs <path>         规范目录（默认 specs；有多项目时选中匹配项或改写当前项目）\n"
         << "      --concepts <path>      概念(.cpt)目录（默认与规范目录相同）\n"
         << "      --watch-interval <ms>  规范目录轮询间隔（默认 2000，0 禁用）\n"
         << "      --no-watch             不监控规范目录变化\n"
@@ -106,6 +106,8 @@ int main(int argc, char* argv[]) {
     testhub::TestHubConfig config;
     std::string configFile;
     std::string pidFile;
+    std::string specsOverride;
+    std::string conceptsOverride;
     bool daemonize = false;
     bool printConfig = false;
 
@@ -163,9 +165,9 @@ int main(int argc, char* argv[]) {
         } else if (opt == "--runner-pool") {
             config.runnerPoolSize = parseIntOrExit(opt, value);
         } else if (opt == "-s" || opt == "--specs") {
-            config.specsDir = value;
+            specsOverride = value;
         } else if (opt == "--concepts") {
-            config.conceptsDir = value;
+            conceptsOverride = value;
         } else if (opt == "--watch-interval") {
             config.specsWatchIntervalMs = parseIntOrExit(opt, value);
             config.specsWatch = config.specsWatchIntervalMs > 0;
@@ -223,6 +225,15 @@ int main(int argc, char* argv[]) {
     if (config.runnerPoolSize > testhub::RunnerBridge::kMaxPoolSize) {
         std::cerr << "错误: --runner-pool 最大为 " << testhub::RunnerBridge::kMaxPoolSize << "\n";
         return 2;
+    }
+
+    config.finalizeProjects();
+    if (!specsOverride.empty()) config.applySpecsDirOverride(specsOverride);
+    if (!conceptsOverride.empty()) {
+        if (testhub::SpecProject* cur = config.findProject(config.currentProjectId)) {
+            cur->conceptsDir = conceptsOverride;
+        }
+        config.applyCurrentProject();
     }
 
     if (printConfig) {
@@ -285,7 +296,8 @@ int main(int argc, char* argv[]) {
                   << "  Web UI : http://" << (config.host == "0.0.0.0" ? "localhost" : config.host) << ":" << hub.boundPort() << "/\n"
                   << "  API    : http://" << (config.host == "0.0.0.0" ? "localhost" : config.host) << ":" << hub.boundPort() << "/api/v1/\n"
                   << "  Runner : " << config.runnerLanguage << "\n"
-                  << "  Specs  : " << hub.getSpecs().specsDir() << "\n"
+                  << "  Specs  : " << hub.getSpecs().specsDir()
+                  << (config.currentProjectId.empty() ? "" : " [" + config.currentProjectId + "]") << "\n"
                   << "  按 Ctrl+C 停止\n\n";
     }
 

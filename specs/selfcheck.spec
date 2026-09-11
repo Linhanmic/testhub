@@ -26,6 +26,8 @@ tags: positive
 
 * 规范列表应包含文件 "login.spec"
 * 规范列表应包含文件 "selfcheck.spec"
+* GET "/api/v1/projects" 的 "count" 应为 "1"
+* GET "/api/v1/status" 的 "current_project" 应为 "default"
 
 ## 通过 API 提交测试
 tags: positive

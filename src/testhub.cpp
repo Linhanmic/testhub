@@ -7,7 +7,113 @@
 #include "util/file_util.h"
 #include "util/logger.h"
 
+#include <algorithm>
+#include <cctype>
+
 namespace testhub {
+
+namespace {
+
+std::string slugId(const std::string& raw, int fallbackIndex) {
+    std::string out;
+    for (unsigned char ch : raw) {
+        if (std::isalnum(ch)) out.push_back(static_cast<char>(std::tolower(ch)));
+        else if (ch == '-' || ch == '_' || ch == '.' || ch == ' ') {
+            if (!out.empty() && out.back() != '-') out.push_back('-');
+        }
+    }
+    while (!out.empty() && out.back() == '-') out.pop_back();
+    if (out.empty()) out = "project-" + std::to_string(fallbackIndex);
+    return out;
+}
+
+std::string uniquifyId(const std::string& id, const std::vector<std::string>& used) {
+    std::string cand = id.empty() ? "project" : id;
+    if (std::find(used.begin(), used.end(), cand) == used.end()) return cand;
+    for (int k = 2; k < 10000; ++k) {
+        std::string next = cand + "-" + std::to_string(k);
+        if (std::find(used.begin(), used.end(), next) == used.end()) return next;
+    }
+    return cand + "-x";
+}
+
+} // namespace
+
+const SpecProject* TestHubConfig::findProject(const std::string& id) const {
+    for (const auto& p : projects) {
+        if (p.id == id) return &p;
+    }
+    return nullptr;
+}
+
+SpecProject* TestHubConfig::findProject(const std::string& id) {
+    for (auto& p : projects) {
+        if (p.id == id) return &p;
+    }
+    return nullptr;
+}
+
+void TestHubConfig::applyCurrentProject() {
+    const SpecProject* p = findProject(currentProjectId);
+    if (!p && !projects.empty()) p = &projects.front();
+    if (!p) return;
+    currentProjectId = p->id;
+    specsDir = p->dir;
+    conceptsDir = p->conceptsDir;
+}
+
+void TestHubConfig::finalizeProjects() {
+    if (projects.empty()) {
+        SpecProject p;
+        p.id = "default";
+        p.name = "默认";
+        p.dir = specsDir.empty() ? "specs" : specsDir;
+        p.conceptsDir = conceptsDir;
+        projects.push_back(std::move(p));
+    }
+    std::vector<std::string> used;
+    int index = 0;
+    for (auto& p : projects) {
+        ++index;
+        if (p.dir.empty()) p.dir = specsDir.empty() ? "specs" : specsDir;
+        if (p.id.empty()) p.id = slugId(p.name, index);
+        p.id = uniquifyId(p.id, used);
+        used.push_back(p.id);
+        if (p.name.empty()) p.name = p.id;
+    }
+    if (!currentProjectId.empty() && findProject(currentProjectId)) {
+        applyCurrentProject();
+        return;
+    }
+    for (const auto& p : projects) {
+        if (p.dir == specsDir) {
+            currentProjectId = p.id;
+            applyCurrentProject();
+            return;
+        }
+    }
+    currentProjectId = projects.front().id;
+    applyCurrentProject();
+}
+
+void TestHubConfig::applySpecsDirOverride(const std::string& dir) {
+    if (dir.empty()) return;
+    finalizeProjects();
+    for (const auto& p : projects) {
+        if (p.dir == dir) {
+            currentProjectId = p.id;
+            applyCurrentProject();
+            return;
+        }
+    }
+    if (SpecProject* cur = findProject(currentProjectId)) {
+        cur->dir = dir;
+    } else if (!projects.empty()) {
+        projects.front().dir = dir;
+        currentProjectId = projects.front().id;
+    }
+    applyCurrentProject();
+}
 
 // ============================================================
 // TestHubConfig
@@ -63,6 +169,20 @@ void TestHubConfig::applyJson(const Json& json) {
     if (specs["default_dir"].isString()) specsDir = specs["default_dir"].asString();
     if (specs["dir"].isString()) specsDir = specs["dir"].asString();
     if (specs["concepts_dir"].isString()) conceptsDir = specs["concepts_dir"].asString();
+    if (specs["current"].isString()) currentProjectId = specs["current"].asString();
+    if (specs["projects"].isArray()) {
+        projects.clear();
+        for (const auto& item : specs["projects"].asArray()) {
+            if (!item.isObject()) continue;
+            SpecProject p;
+            p.id = item["id"].asString("");
+            p.name = item["name"].asString("");
+            p.dir = item["dir"].asString("");
+            p.conceptsDir = item["concepts_dir"].asString("");
+            if (p.dir.empty() && p.id.empty() && p.name.empty()) continue;
+            projects.push_back(std::move(p));
+        }
+    }
     if (specs["watch"].isBool()) specsWatch = specs["watch"].asBool();
     if (specs["watch_interval_ms"].isNumber()) specsWatchIntervalMs = specs["watch_interval_ms"].asInt();
 
@@ -122,6 +242,17 @@ Json TestHubConfig::toJson(bool maskSecrets) const {
     Json specs = Json::object();
     specs["dir"] = specsDir;
     specs["concepts_dir"] = conceptsDir;
+    specs["current"] = currentProjectId;
+    Json arr = Json::array();
+    for (const auto& p : projects) {
+        Json o = Json::object();
+        o["id"] = p.id;
+        o["name"] = p.name;
+        o["dir"] = p.dir;
+        o["concepts_dir"] = p.conceptsDir;
+        arr.push(o);
+    }
+    specs["projects"] = arr;
     specs["watch"] = specsWatch;
     specs["watch_interval_ms"] = specsWatchIntervalMs;
     j["specs"] = specs;
@@ -145,6 +276,7 @@ TestHub::~TestHub() { stop(); }
 bool TestHub::initialize(const TestHubConfig& config) {
     if (initialized_) return true;
     config_ = config;
+    config_.finalizeProjects();
 
     Logger::getInstance().setLevel(logLevelFromString(config_.logLevel));
     if (!config_.logFile.empty() && !Logger::getInstance().setFile(config_.logFile)) {
@@ -278,7 +410,8 @@ bool TestHub::start() {
 
     TH_LOG_INFO("testhub", std::string("TestHub ") + version() + " started on http://" +
                            (config_.host == "0.0.0.0" ? "localhost" : config_.host) + ":" + std::to_string(boundPort()));
-    TH_LOG_INFO("testhub", "Specs directory: " + specs_.specsDir());
+    TH_LOG_INFO("testhub", "Specs directory: " + specs_.specsDir() +
+                           (config_.currentProjectId.empty() ? "" : " (project " + config_.currentProjectId + ")"));
     TH_LOG_INFO("testhub", "Runner: " + config_.runnerLanguage + (config_.runnerCommand.empty() ? "" : " (" + config_.runnerCommand + ")") +
                            (runnerBridge_->poolSize() > 1 ? " x" + std::to_string(runnerBridge_->poolSize()) + " (pool)" : ""));
     if (auth_.enabled()) {
@@ -321,6 +454,13 @@ Json TestHub::statusJson() const {
     j["started_at"] = TimeUtil::toIso8601(startedAt_);
     j["uptime_seconds"] = running_ ? std::chrono::duration<double>(TimeUtil::now() - startedAt_).count() : 0.0;
     j["specs_dir"] = specs_.specsDir();
+    {
+        std::lock_guard<std::mutex> lock(projectMutex_);
+        j["current_project"] = config_.currentProjectId;
+        const SpecProject* p = config_.findProject(config_.currentProjectId);
+        j["current_project_name"] = p ? p->name : config_.currentProjectId;
+        j["project_count"] = static_cast<int>(config_.projects.size());
+    }
     j["concepts"] = static_cast<int>(specs_.concepts().size());
     {
         spec::SpecWatcherStats w = specWatcher_.stats();
@@ -394,6 +534,64 @@ Json TestHub::statusJson() const {
     auth["protect_reads"] = auth_.config().protectReads;
     j["auth"] = auth;
     return j;
+}
+
+Json TestHub::projectsJson() const {
+    std::lock_guard<std::mutex> lock(projectMutex_);
+    Json arr = Json::array();
+    for (const auto& p : config_.projects) {
+        Json o = Json::object();
+        o["id"] = p.id;
+        o["name"] = p.name;
+        o["dir"] = p.dir;
+        o["concepts_dir"] = p.conceptsDir;
+        o["current"] = p.id == config_.currentProjectId;
+        arr.push(o);
+    }
+    Json j = Json::object();
+    j["current"] = config_.currentProjectId;
+    j["count"] = static_cast<int>(config_.projects.size());
+    j["specs_dir"] = specs_.specsDir();
+    j["projects"] = arr;
+    return j;
+}
+
+bool TestHub::selectProject(const std::string& id, std::string& error) {
+    std::lock_guard<std::mutex> lock(projectMutex_);
+    const SpecProject* p = config_.findProject(id);
+    if (!p) {
+        error = "Project not found: " + id;
+        return false;
+    }
+    if (p->id == config_.currentProjectId) return true;
+    if (engine_) {
+        EngineStats st = engine_->stats();
+        if (st.queued + st.running > 0) {
+            error = "Cannot switch project while tests are queued or running";
+            return false;
+        }
+    }
+    config_.currentProjectId = p->id;
+    config_.applyCurrentProject();
+    specs_.configure(config_.specsDir, config_.conceptsDir);
+    auto conceptErrors = specs_.reloadConcepts();
+    for (const auto& e : conceptErrors) {
+        TH_LOG_WARN("specs", e.fileName + ":" + std::to_string(e.lineNumber) + ": " + e.message);
+    }
+    specWatcher_.acknowledge();
+    TH_LOG_INFO("testhub", "Switched project to " + config_.currentProjectId + " (" + specs_.specsDir() + ")");
+    publishEvent(EventType::PROJECT_CHANGED, "", {
+        {"project_id", config_.currentProjectId},
+        {"name", p->name},
+        {"specs_dir", specs_.specsDir()},
+        {"concepts", std::to_string(specs_.concepts().size())},
+    });
+    publishEvent(EventType::SPECS_RELOADED, "", {
+        {"source", "project"},
+        {"project_id", config_.currentProjectId},
+        {"concepts", std::to_string(specs_.concepts().size())},
+    });
+    return true;
 }
 
 } // namespace testhub

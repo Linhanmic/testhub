@@ -154,6 +154,20 @@ http.get("/api/v1/hello/{name}", [this](const HttpRequest& req) {
 
 把 `.spec` 放入 `specs/`，概念放入 `specs/concepts/`。服务默认每 2 秒轮询规范目录，用编辑器或 `git pull` 改动的文件会自动生效（概念自动重载，UI 规范页实时刷新并提示）；也可以调用 `POST /api/v1/specs/reload` 或在 UI 点击"重新加载"立即扫描。`--watch-interval <ms>` 调整频率，`--no-watch` 关闭。
 
+多个规范根目录可在配置里列为项目，运行时在侧栏切换（有测试排队/运行中会 409，避免跑到一半换目录）：
+
+```json
+"specs": {
+  "current": "main",
+  "projects": [
+    {"id": "main", "name": "主规范", "dir": "specs"},
+    {"id": "alt", "name": "备用示例", "dir": "examples/alt-specs"}
+  ]
+}
+```
+
+未配置 `projects` 时会从 `specs.dir` 自动生成 id 为 `default` 的单项。`--specs` 若与某项目 `dir` 相同则选中该项，否则改写当前项目目录。计划里的相对路径相对于**当前**项目根目录。
+
 ### 添加定时计划
 
 在 UI「测试计划」页填写 UTC cron（或 `@hourly`）并勾选规范，或：

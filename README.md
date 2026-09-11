@@ -20,8 +20,8 @@ TestHub 是一个**长运行的自动化测试守护进程**：它常驻内存�
 | Runner | 跨平台子进程桥接 + JSON-lines 协议；内置 mock Runner；**Python** 与 **Node.js** 两个参考 Runner（步骤注册、钩子、数据表、消息；Node 支持 async 步骤），同一套 .spec 可互换执行；**Runner 池**：默认每个并发测试独占一个进程，`parallel_streams` 可让一个测试占用多个进程；进程逐个自愈、按需重启 |
 | 服务端 | 多线程 HTTP/1.1（keep-alive、流水线、Content-Length、超时、`{param}` 路由、CORS、HEAD/OPTIONS、ETag 静态资源、SPA 回退） |
 | 实时性 | 异步事件总线；`/ws/v1/events` WebSocket 推送（按类型/测试 ID 订阅、历史回放） |
-| Web UI | 内嵌单页应用：总览、提交测试、测试记录、**结果趋势**、**测试计划（cron）**、结果树（搜索 / 只看失败）、运行中实时执行树、规范浏览/编辑（语法高亮与步骤补全）、Runner 状态、事件流（暂停 / 导出）、键盘快捷键、暗色模式 |
-| 质量 | 90 个单元测试 + 21 个 HTTP/WS 集成测试 + 7 个 Python 协议测试 + 12 个 Node.js 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
+| Web UI | 内嵌单页应用：总览、提交测试、测试记录、**结果趋势**、**测试计划（cron）**、结果树（搜索 / 只看失败）、运行中实时执行树、规范浏览/编辑（语法高亮与步骤补全）、**多规范项目切换**、Runner 状态、事件流（暂停 / 导出）、键盘快捷键、暗色模式 |
+| 质量 | 95 个单元测试 + 22 个 HTTP/WS 集成测试 + 7 个 Python 协议测试 + 12 个 Node.js 协议测试；`ctest` 一键运行；GitHub Actions（Linux g++/clang++、macOS，`-Werror`）；ThreadSanitizer 零告警 |
 
 ## 快速开始
 
@@ -140,8 +140,10 @@ Runner 启动时会加载 `--dir` 下 `step_impl/` 中的全部 `.py` / `.js` �
 | 方法 | 路径 | 描述 |
 |------|------|------|
 | GET | `/api/v1/health` | 健康检查 |
-| GET | `/api/v1/status` | 服务器统计（队列、运行中、通过/失败计数、本机 `url`、调度器） |
+| GET | `/api/v1/status` | 服务器统计（队列、运行中、通过/失败计数、本机 `url`、调度器、当前规范项目） |
 | GET | `/api/v1/config` | 当前生效配置 |
+| GET | `/api/v1/projects` | 列出规范项目（`current`、各项目 `dir`） |
+| POST | `/api/v1/projects/{id}/select` | 切换当前规范目录（有测试排队/运行中返回 409） |
 | POST | `/api/v1/tests`（别名 `/tests/run`） | 提交测试，返回 202 与 `test_id` |
 | GET | `/api/v1/tests?state=&limit=&offset=` | 列出测试 |
 | DELETE | `/api/v1/tests` | 清空已完成历史 |
@@ -181,7 +183,7 @@ WebSocket 连接后发送 `{"action":"subscribe","events":["test.*","scenario.*"
 -r, --runner-cmd <cmd>     自定义 Runner 启动命令
 -d, --dir <path>           测试项目目录（Runner 工作目录）
     --runner-pool <n>      Runner 进程数（默认 0：跟随 -j，每个并发测试一个进程）
--s, --specs <path>         规范目录（默认 specs）
+-s, --specs <path>         规范目录（默认 specs；多项目时选中匹配项或改写当前项目）
     --concepts <path>      概念目录（默认与规范目录相同）
     --watch-interval <ms>  规范目录轮询间隔（默认 2000，0 禁用）
     --no-watch             不监控规范目录变化

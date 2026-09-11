@@ -27,6 +27,16 @@
 namespace testhub {
 
 /**
+ * 一个规范项目：独立的 .spec 根目录（概念目录可选）
+ */
+struct SpecProject {
+    std::string id;
+    std::string name;
+    std::string dir;
+    std::string conceptsDir;
+};
+
+/**
  * TestHub 配置
  */
 struct TestHubConfig {
@@ -78,9 +88,11 @@ struct TestHubConfig {
     int callbackRetryBackoffMs = 1000;
     std::string publicBaseUrl;     // 回调载荷中 links 的前缀，如 http://ci.example.com:8080
 
-    // 规范
+    // 规范（可配置多个项目目录，运行时切换当前项）
     std::string specsDir = "specs";
     std::string conceptsDir;
+    std::string currentProjectId;
+    std::vector<SpecProject> projects;
     bool specsWatch = true;            // 轮询监控规范目录，自动重载概念并推送 specs.reloaded
     int specsWatchIntervalMs = 2000;
 
@@ -93,6 +105,13 @@ struct TestHubConfig {
      * 从 JSON 配置文件合并（存在的键覆盖当前值）
      */
     void applyJson(const Json& json);
+    /** 若未配置 projects，用 specsDir 合成默认项目；解析 current 并同步 specsDir/conceptsDir */
+    void finalizeProjects();
+    /** CLI `--specs`：选中目录匹配的项目，否则改写当前项目的 dir */
+    void applySpecsDirOverride(const std::string& dir);
+    const SpecProject* findProject(const std::string& id) const;
+    SpecProject* findProject(const std::string& id);
+    void applyCurrentProject();
     /** maskSecrets 为 true 时 auth_token 以 "***" 输出（用于 --print-config 与 GET /config） */
     Json toJson(bool maskSecrets = true) const;
 };
@@ -124,6 +143,10 @@ public:
     spec::SpecRepository& getSpecs() { return specs_; }
     spec::SpecWatcher& getSpecWatcher() { return specWatcher_; }
     EventBus& getEventBus() { return EventBus::getInstance(); }
+
+    Json projectsJson() const;
+    /** 切换当前规范项目；找不到返回 false 且 error 含 "not found"；忙碌时含 "queued or running" */
+    bool selectProject(const std::string& id, std::string& error);
 
     /**
      * 实际监听端口（port=0 时由系统分配）
@@ -158,6 +181,7 @@ private:
     std::atomic<bool> initialized_{false};
     std::string eventHandlerId_;
     TimePoint startedAt_;
+    mutable std::mutex projectMutex_;
 
     void registerApiRoutes();
     void registerWebUi();

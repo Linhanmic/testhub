@@ -186,6 +186,39 @@
     $('.conn-text', el).textContent = text;
   }
 
+  const projects = {
+    data: null,
+    async refresh() {
+      try { this.data = await api('/projects'); } catch { this.data = { projects: [], current: '', count: 0 }; }
+      this.render();
+      return this.data;
+    },
+    render() {
+      const wrap = $('#project-switch');
+      const sel = $('#project-select');
+      if (!wrap || !sel) return;
+      const list = (this.data && this.data.projects) || [];
+      wrap.hidden = list.length === 0;
+      const cur = (this.data && this.data.current) || '';
+      sel.innerHTML = list.map((p) => `<option value="${esc(p.id)}"${p.id === cur ? ' selected' : ''}>${esc(p.name || p.id)}</option>`).join('');
+      sel.disabled = list.length < 2;
+    },
+    async select(id) {
+      if (!id || (this.data && this.data.current === id)) return;
+      try {
+        this.data = await api(`/projects/${encodeURIComponent(id)}/select`, { method: 'POST', body: {} });
+        this.render();
+        const name = ((this.data.projects || []).find((p) => p.id === id) || {}).name || id;
+        toast(`已切换到项目「${name}」`, 'ok');
+        if (/^#\/specs\/.+/.test(location.hash)) location.hash = '#/specs';
+        else navigate();
+      } catch (err) {
+        toast(err.message, 'error');
+        this.render();
+      }
+    },
+  };
+
   // ------------------------------------------------------------
   // 路由
   // ------------------------------------------------------------
@@ -223,7 +256,7 @@
     const d = ev.data || {};
     const parts = [];
     if (ev.test_id) parts.push(`<a href="#/tests/${esc(ev.test_id)}">${esc(ev.test_id)}</a>`);
-    for (const k of ['state', 'spec', 'scenario', 'step', 'progress', 'detail', 'message', 'error', 'name', 'url', 'status', 'attempts', 'attempt', 'max_retries', 'source', 'action', 'file', 'files', 'created', 'updated', 'deleted', 'slot', 'stream', 'schedule_id', 'cron', 'reason']) {
+    for (const k of ['state', 'spec', 'scenario', 'step', 'progress', 'detail', 'message', 'error', 'name', 'url', 'status', 'attempts', 'attempt', 'max_retries', 'source', 'action', 'file', 'files', 'created', 'updated', 'deleted', 'slot', 'stream', 'schedule_id', 'cron', 'reason', 'project_id', 'specs_dir']) {
       if (d[k] !== undefined && d[k] !== '') {
         let v = d[k];
         if ((k === 'created' || k === 'updated' || k === 'deleted') && v === '0') continue;
@@ -335,7 +368,7 @@
     const dashSeries = overallSeries(trends);
 
     main.innerHTML = `
-      ${header('总览', `TestHub ${esc(status.version)} · 运行 ${fmtDur(status.uptime_seconds)} · 规范目录 <code>${esc(status.specs_dir)}</code>`,
+      ${header('总览', `TestHub ${esc(status.version)} · 运行 ${fmtDur(status.uptime_seconds)} · 项目 <b>${esc(status.current_project_name || status.current_project || '默认')}</b> · 规范目录 <code>${esc(status.specs_dir)}</code>`,
         `<a class="btn primary" href="#/run">▶ 提交测试</a>`)}
       <div class="grid grid-4 mb">
         <div class="card stat info"><div class="label">排队 / 运行中</div><div class="value" id="st-active">${s.queued}<span class="muted" style="font-size:16px"> / ${s.running}</span></div><div class="hint">当前活跃任务</div></div>
@@ -1501,7 +1534,7 @@
     if (file) return specDetail(main, file);
     const data = await api('/specs');
     const concepts = await api('/concepts');
-    main.innerHTML = `${header('规范文件', `<code>${esc(data.specs_dir)}</code> · ${data.count} 个规范 · ${data.total_scenarios} 个场景 · ${concepts.count} 个概念`,
+    main.innerHTML = `${header('规范文件', `<code>${esc(data.specs_dir)}</code>${data.current_project ? ` · 项目 <b>${esc(data.current_project)}</b>` : ''} · ${data.count} 个规范 · ${data.total_scenarios} 个场景 · ${concepts.count} 个概念`,
       `<button class="btn" id="reload-specs">↻ 重新加载</button><button class="btn" id="validate-all">校验全部</button><button class="btn primary" id="new-spec">＋ 新建规范</button>`)}
       <div id="validate-out"></div>
       <div class="card"><div class="table-wrap">${data.specs.length ? `<table><thead><tr><th>文件</th><th>标题</th><th>标签</th><th>场景</th><th>状态</th><th></th></tr></thead><tbody>
@@ -1750,6 +1783,13 @@
   // ------------------------------------------------------------
   $('#auth-btn').addEventListener('click', () => auth.prompt().then((saved) => { if (saved) { if (auth.protectReads) live.reconnect(); navigate(); } }));
   $('#shortcuts-btn').addEventListener('click', () => showShortcuts());
+  $('#project-select').addEventListener('change', (e) => { projects.select(e.target.value); });
+  live.on((ev) => {
+    if (ev.event !== 'project.changed') return;
+    const id = (ev.data && ev.data.project_id) || '';
+    const already = projects.data && projects.data.current === id;
+    projects.refresh().then(() => { if (!already) navigate(); });
+  });
   let goChord = null;
   window.addEventListener('keydown', (e) => {
     const el = e.target;
@@ -1802,6 +1842,7 @@
     auth.required = !!h.auth_required; auth.protectReads = !!h.auth_protect_reads;
     auth.render();
     if (auth.required && !auth.token) toast(auth.protectReads ? '服务器要求 API Token，请点击左下角"鉴权"设置' : '服务器已启用鉴权：提交/取消/删除等写操作需要 API Token', 'info', 6000);
-    live.connect(); navigate();
-  }).catch(() => { live.connect(); navigate(); });
+    live.connect();
+    projects.refresh().then(() => navigate());
+  }).catch(() => { live.connect(); projects.refresh().then(() => navigate()); });
 })();

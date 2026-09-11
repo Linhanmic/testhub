@@ -337,6 +337,7 @@ namespace EventType {
     const std::string RUNNER_LOG = "runner.log";
     const std::string QUEUE_UPDATED = "queue.updated";
     const std::string SPECS_RELOADED = "specs.reloaded";
+    const std::string PROJECT_CHANGED = "project.changed";
     const std::string CALLBACK_DELIVERED = "callback.delivered";
     const std::string CALLBACK_FAILED = "callback.failed";
     const std::string SCHEDULE_CREATED = "schedule.created";

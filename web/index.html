@@ -17,7 +17,11 @@
         <span class="brand-text">TestHub</span>
         <span class="brand-version" id="brand-version"></span>
       </a>
-    <nav class="nav" id="nav" aria-label="主导航">
+      <div class="project-switch" id="project-switch" hidden>
+        <label class="visually-hidden" for="project-select">当前规范项目</label>
+        <select id="project-select" aria-label="当前规范项目"></select>
+      </div>
+      <nav class="nav" id="nav" aria-label="主导航">
         <a href="#/dashboard" data-route="dashboard"><span class="nav-icon">◫</span>总览</a>
         <a href="#/run" data-route="run"><span class="nav-icon">▶</span>提交测试</a>
         <a href="#/tests" data-route="tests"><span class="nav-icon">☰</span>测试记录</a>

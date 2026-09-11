@@ -1207,3 +1207,66 @@ TEST_CASE("integration: trends and compare against previous login.spec run") {
     CHECK_EQ(with.status, 200);
     CHECK(!with.json()["baseline_auto"].asBool());
 }
+
+TEST_CASE("integration: switch spec projects") {
+    std::string alt = makeTempDir("testhub-alt-");
+    FileUtil::writeFile(alt + "/hello.spec", "# Hello\n\n## S\n\n* sleep \"0\"\n");
+    Server s("", [&](TestHubConfig& cfg) {
+        SpecProject main;
+        main.id = "main";
+        main.name = "主规范";
+        main.dir = cfg.specsDir;
+        SpecProject other;
+        other.id = "alt";
+        other.name = "备用";
+        other.dir = alt;
+        cfg.projects = {main, other};
+        cfg.currentProjectId = "main";
+    });
+
+    HttpResult listed = request(s.port, "GET", "/api/v1/projects");
+    REQUIRE_EQ(listed.status, 200);
+    CHECK_EQ(listed.json()["count"].asInt(), 2);
+    CHECK_EQ(listed.json()["current"].asString(), std::string("main"));
+    CHECK_EQ(request(s.port, "GET", "/api/v1/status").json()["current_project"].asString(), std::string("main"));
+
+    Json specs = request(s.port, "GET", "/api/v1/specs").json();
+    CHECK_EQ(specs["current_project"].asString(), std::string("main"));
+    bool hasLogin = false, hasHello = false;
+    for (const auto& f : specs["specs"].asArray()) {
+        if (f["file"].asString() == "login.spec") hasLogin = true;
+        if (f["file"].asString() == "hello.spec") hasHello = true;
+    }
+    CHECK(hasLogin);
+    CHECK(!hasHello);
+
+    CHECK_EQ(request(s.port, "POST", "/api/v1/projects/nope/select", "{}").status, 404);
+
+    HttpResult sw = request(s.port, "POST", "/api/v1/projects/alt/select", "{}");
+    REQUIRE_EQ(sw.status, 200);
+    CHECK_EQ(sw.json()["current"].asString(), std::string("alt"));
+    Json altSpecs = request(s.port, "GET", "/api/v1/specs").json();
+    hasLogin = false;
+    hasHello = false;
+    for (const auto& f : altSpecs["specs"].asArray()) {
+        if (f["file"].asString() == "login.spec") hasLogin = true;
+        if (f["file"].asString() == "hello.spec") hasHello = true;
+    }
+    CHECK(hasHello);
+    CHECK(!hasLogin);
+    CHECK_EQ(request(s.port, "GET", "/api/v1/status").json()["current_project"].asString(), std::string("alt"));
+    CHECK_EQ(request(s.port, "POST", "/api/v1/projects/alt/select", "{}").status, 200);
+
+    REQUIRE_EQ(request(s.port, "POST", "/api/v1/projects/main/select", "{}").status, 200);
+    std::string slow = "# Slow\n## s\n* sleep \"800\"\n";
+    FileUtil::writeFile(s.specsDir + "/slow.spec", slow);
+    HttpResult submit = request(s.port, "POST", "/api/v1/tests", R"({"spec_files":["slow.spec"]})");
+    REQUIRE_EQ(submit.status, 202);
+    CHECK_EQ(request(s.port, "POST", "/api/v1/projects/alt/select", "{}").status, 409);
+    Json st = s.waitForTerminal(submit.json()["test_id"].asString());
+    REQUIRE(!st.isNull());
+    CHECK_EQ(request(s.port, "POST", "/api/v1/projects/alt/select", "{}").status, 200);
+
+    std::error_code ec;
+    fs::remove_all(alt, ec);
+}

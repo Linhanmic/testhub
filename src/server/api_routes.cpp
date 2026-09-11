@@ -78,6 +78,18 @@ void TestHub::registerApiRoutes() {
         return HttpResponse::json(200, config_.toJson());
     });
 
+    http.get("/api/v1/projects", [this](const HttpRequest&) {
+        return HttpResponse::json(200, projectsJson());
+    });
+    http.post("/api/v1/projects/{id}/select", [this](const HttpRequest& req) {
+        std::string error;
+        if (!selectProject(req.param("id"), error)) {
+            int code = error.find("not found") != std::string::npos ? 404 : 409;
+            return HttpResponse::error(code, error);
+        }
+        return HttpResponse::json(200, projectsJson());
+    });
+
     // ---------------- 测试 ----------------
     auto submit = [this](const HttpRequest& req) {
         Json body = parseBody(req);
@@ -300,6 +312,7 @@ void TestHub::registerApiRoutes() {
         j["total_scenarios"] = scenarios;
         j["invalid"] = invalid;
         j["specs_dir"] = specs_.specsDir();
+        j["current_project"] = config_.currentProjectId;
         j["concepts"] = static_cast<int>(specs_.concepts().size());
         return HttpResponse::json(200, j);
     });

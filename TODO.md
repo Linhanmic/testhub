@@ -6,7 +6,7 @@
 
 - 自包含 C++17 项目，零第三方依赖，`-Werror` 零警告（GCC / Clang）
 - 约 15k 行（含前端、Python / Node.js Runner、测试）
-- 130 个自动化测试全部通过（90 单元 + 21 集成 + 7 Python 协议 + 12 Node.js 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
+- 136 个自动化测试全部通过（95 单元 + 22 集成 + 7 Python 协议 + 12 Node.js 协议），GitHub Actions 三平台 CI；ThreadSanitizer 零告警
 
 ## 路线图
 
@@ -39,7 +39,7 @@
 - [x] 步骤级重试策略（`retry: n` 标签或请求参数）
 - [x] UI：结果树搜索/只看失败、事件流暂停与导出、键盘快捷键
 - [x] UI：规范编辑器语法高亮与步骤自动补全（基于 `/runner/steps`）
-- [ ] 多规范目录 / 多项目切换
+- [x] 多规范目录 / 多项目切换
 - [ ] Windows 打包与服务安装脚本；Dockerfile
 
 ### P3 — 工程质量
@@ -225,6 +225,15 @@
 - mock Runner 不报告步骤时仍可补全概念；Python/Node Runner 提供完整步骤列表
 - 浏览器实测（Python Runner `:18084`）：编辑 `login.spec` 时 `#`/`##`/`tags:` 着色；hint「可补全 26 个 Runner 步骤、1 个概念」；输入 `* 输入` 过滤出「输入用户名/密码/第一个数/第二个数」；点击插入 `* 输入用户名 <name>` 且 listbox 关闭；Esc 关闭补全；源码 tab 行号 + 同类高亮；未点保存，磁盘上的 `specs/login.spec` 未改
 
+### 迭代 23 — 多规范目录 / 项目切换
+
+- 配置 `specs.projects` + `specs.current`；缺省从 `specs.dir` 合成 `default` 项目。`--specs` 匹配已有 `dir` 则选中，否则改写当前项目目录
+- API：`GET /api/v1/projects`；`POST /api/v1/projects/{id}/select`（找不到 404；排队或运行中 409）。切换后重配 SpecRepository、重载概念、`acknowledge` 监控快照，发布 `project.changed` 与 `specs.reloaded`（source=project）
+- Runner 仍全局共享：项目只切换规范/概念根目录，不重启步骤实现进程
+- UI：侧栏原生 `<select>`；单项时禁用以免误触；详情 hash 在切换后回到规范列表
+- 测试：单元 5（合成/JSON current/slug 去重/CLI 覆盖/往返）+ 集成切换与 409。自举增加 `GET /projects` count=1 与 `current_project=default`
+- 示例：`examples/alt-specs/hello.spec`
+
 ---
 
 ## 决策记录
@@ -250,6 +259,7 @@
 | 迭代 18 | 只重试 FAILED，不重试 TEST_ERROR / 取消 / 超时；请求与标签取 max，上限 5 | 缺实现、崩溃、超时再跑一遍通常无意义；断言抖动才适合有限次重试。标签可按场景覆盖全局请求，避免误伤稳定用例 |
 | 迭代 19 | 过滤用 `hidden="until-found"` 而非从 DOM 删除；快捷键在输入框与对话框内不拦截 | 页内查找仍能发现被「只看失败」藏起的通过步骤；避免在表单或快捷键说明里误触 `g`/`f`/`/` |
 | 迭代 22 | 编辑器高亮用叠加层而非 contenteditable；补全同时收录 Runner 步骤与概念 | contenteditable 难与原生撤销/选区/读屏共存；mock 不报告步骤时概念仍能补全 |
+| 迭代 23 | 项目只切换规范/概念目录，Runner 保持全局 | 「多套用例、同一套步骤实现」是主场景；换 Runner 要重启进程池且不能与运行中的测试并存，留给以后按项目覆盖 runner 字段 |
 
 ---
 
@@ -258,7 +268,7 @@
 | 指标 | 当前 |
 |------|------|
 | 编译警告（`-Wall -Wextra -Wpedantic -Werror`） | 0（GCC 13、Clang 18） |
-| 自动化测试 | 130 个，全部通过（90 单元 + 21 集成 + 7 Python 协议 + 12 Node 协议）；`ctest` 约 7 s；TSan 零告警 |
+| 自动化测试 | 136 个，全部通过（95 单元 + 22 集成 + 7 Python 协议 + 12 Node 协议）；`ctest` 约 7 s；TSan 零告警 |
 | 健康检查响应 | < 1 ms（本机） |
 | 空载内存 | 约 7 MB（不含 Runner 子进程） |
 | 代码规模 | 约 14k 行（C++ 约 10.2k，前端约 1.2k，Python 约 0.7k，测试约 2.4k） |
