@@ -303,7 +303,9 @@
         try {
           const [st, t] = await Promise.all([api('/status'), api('/tests?limit=10')]);
           const ss = st.stats;
-          $('#st-active').innerHTML = `${ss.queued}<span class="muted" style="font-size:16px"> / ${ss.running}</span>`;
+          const activeEl = $('#st-active');
+          if (!activeEl) return;  // 已离开总览页
+          activeEl.innerHTML = `${ss.queued}<span class="muted" style="font-size:16px"> / ${ss.running}</span>`;
           $('#st-passed').textContent = ss.passed;
           $('#st-failed').innerHTML = `${ss.failed}<span class="muted" style="font-size:16px"> / ${ss.errored}</span>`;
           $('#st-rate').textContent = ss.total_scenarios ? Math.round((ss.passed_scenarios / ss.total_scenarios) * 100) + '%' : '-';
