@@ -321,7 +321,6 @@
     '{title} 耗时': '{title} duration',
     '还没有已完成的测试。提交几次后即可看到通过率与耗时曲线。': 'No finished runs yet. Submit a few tests to see pass-rate and duration curves.',
     '同一规范历次通过率与耗时（已取消的测试不计入）': 'Pass rate and duration per spec (cancelled runs omitted)',
-    '概念': 'Concept',
     '步骤': 'Step',
     '没有匹配的步骤': 'No matching steps',
     '可补全 {n} 个 Runner 步骤{concepts}。在 * 行输入，或 Ctrl+Space /「步骤补全」。': '{n} Runner steps{concepts} available. Type on a * line, or Ctrl+Space / Step complete.',

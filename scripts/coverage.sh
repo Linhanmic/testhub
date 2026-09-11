@@ -16,12 +16,15 @@ cmake -S . -B "$BUILD" \
 cmake --build "$BUILD" --parallel
 ctest --test-dir "$BUILD" --output-on-failure --timeout 180
 
+GCOVR_FLAGS=(
+  -r "$ROOT" "$BUILD"
+  --exclude 'tests/'
+  --exclude 'generated/'
+  --exclude 'runners/'
+  --gcov-ignore-parse-errors=negative_hits.warn
+)
 if command -v gcovr >/dev/null 2>&1; then
-  gcovr -r "$ROOT" "$BUILD" \
-    --exclude '.*/tests/.*' \
-    --exclude '.*/generated/.*' \
-    --exclude '.*/runners/.*' \
-    --print-summary
+  gcovr "${GCOVR_FLAGS[@]}" --print-summary
 elif command -v lcov >/dev/null 2>&1; then
   lcov --capture --directory "$BUILD" --output-file "$BUILD/coverage.info" --gcov-tool gcov --quiet
   lcov --remove "$BUILD/coverage.info" '/usr/*' '*/tests/*' '*/generated/*' --output-file "$BUILD/coverage.info" --quiet

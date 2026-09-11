@@ -162,11 +162,11 @@
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${proto}://${location.host}/ws/v1/events${auth.qs()}`);
       this.ws = ws;
-      ws.onopen = () => { this.retry = 0; setConn('online', t('实时连接已建立')); };
+      ws.onopen = () => { this.retry = 0; setConn('online', '实时连接已建立'); };
       ws.onclose = () => {
         if (this.ws !== ws) return;  // 已被 reconnect() 替换
         const needToken = auth.protectReads && !auth.token;
-        setConn('offline', needToken ? t('实时连接需要 API Token') : t('实时连接断开，重连中…'));
+        setConn('offline', needToken ? '实时连接需要 API Token' : '实时连接断开，重连中…');
         const delay = Math.min(15000, 500 * Math.pow(2, this.retry++));
         this.timer = setTimeout(() => this.connect(), needToken ? 15000 : delay);
       };
@@ -187,10 +187,12 @@
       this.connect();
     },
   };
-  function setConn(cls, text) {
+  function setConn(cls, zhKey) {
     const el = $('#conn-indicator');
     el.className = `conn ${cls}`;
-    $('.conn-text', el).textContent = text;
+    const text = $('.conn-text', el);
+    text.setAttribute('data-i18n', zhKey);
+    text.textContent = t(zhKey);
   }
 
   const projects = {

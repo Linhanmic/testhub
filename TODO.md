@@ -252,7 +252,7 @@
 ### 迭代 26 — P3 工程质量
 
 - `scripts/stress.py`：并发 GET、2500 场景校验、提交 login.spec、采样 `/proc/pid` RSS；`ctest` 注册 `http_stress`
-- `.clang-tidy` + CI job；`TESTHUB_ENABLE_COVERAGE` + `scripts/coverage.sh` + CI 行覆盖率门槛 50%
+- `.clang-tidy` + CI job；`TESTHUB_ENABLE_COVERAGE` + `scripts/coverage.sh`；gcovr 忽略 gcc 负命中解析错误，行覆盖率门槛 50%（源码约 86%）
 - UI i18n：`web/i18n.js` 中文为键、英文对照；侧栏原生 `<select>` 切换；`document.documentElement.lang`；`localizePage` 翻译精确匹配的标签。仪表盘服务摘要（规范监控 / 计划 / 回调）与插值字符串走 `t()`。规范正文与步骤名不翻译
 - `tests/test_i18n.js` 校验目录与插值
 

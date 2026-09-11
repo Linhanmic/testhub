@@ -104,7 +104,11 @@ jobs:
         run: |
           chmod +x scripts/coverage.sh
           ./scripts/coverage.sh
-          gcovr -r . build-cov --exclude '.*/tests/.*' --exclude '.*/generated/.*' --fail-under-line 50
+          gcovr -r . build-cov \
+            --exclude 'tests/' \
+            --exclude 'generated/' \
+            --gcov-ignore-parse-errors=negative_hits.warn \
+            --fail-under-line 50
 
   windows:
     name: windows / msvc
